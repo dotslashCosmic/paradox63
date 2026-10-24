@@ -1,0 +1,10 @@
+/*
+!/.gitignore
+!/LICENSE
+!/Cargo.toml
+!/p63-core/
+!/p63-asm/
+!/p63-dis/
+!/p63-sim/
+
+target/

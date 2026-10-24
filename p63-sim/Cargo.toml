@@ -1,0 +1,13 @@
+[package]
+name = "p63-sim"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+p63-core = { path = "../p63-core" }
+p63-asm = { path = "../p63-asm" }
+p63-dis = { path = "../p63-dis" }
+clap.workspace = true
+anyhow.workspace = true
+rustyline.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "p63-asm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+p63-core = { path = "../p63-core" }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "p63-dis"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+p63-core = { path = "../p63-core" }
+
+[dev-dependencies]
+proptest.workspace = true

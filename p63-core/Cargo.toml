@@ -1,0 +1,15 @@
+[package]
+name = "p63-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+p63-spec = { path = "../p63-spec" }
+bitflags.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
