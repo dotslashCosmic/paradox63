@@ -1,6 +1,7 @@
 //! Data transfer instruction handlers for the reference interpreter.
 
 use crate::{Addr, Bus, Cycles, CpuError, Flags};
+use super::operand::odd_penalty;
 use super::ReferenceInterpreter;
 
 impl<B: Bus> ReferenceInterpreter<B> {
@@ -274,7 +275,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         // Little-endian: LSB at lower address
         self.bus.write(Addr::new(addr), value as u8);
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// ST E, addr — Store E to direct page (opcode 0x0C, 3 cycles)
@@ -321,7 +322,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         // Little-endian: LSB at lower address
         self.bus.write(Addr::new(addr), value as u8);
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// ST Q, addr — Store Q to direct page (opcode 0x0F, 4 cycles)
@@ -340,7 +341,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
         self.bus.write(Addr::new(addr + 2), (value >> 16) as u8);
         self.bus.write(Addr::new(addr + 3), (value >> 24) as u8);
-        Ok(Cycles(4))
+        Ok(Cycles(4 + odd_penalty(addr, 4)))
     }
 
     /// LD A, addr — Load A from direct page (opcode 0x46, 3 cycles)
@@ -390,7 +391,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u16::from(lsb) | (u16::from(msb) << 8);
         self.registers.set_d(value);
         self.update_nz_16(value);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// LD E, addr — Load E from direct page (opcode 0x49, 3 cycles)
@@ -440,7 +441,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u16::from(lsb) | (u16::from(msb) << 8);
         self.registers.set_w(value);
         self.update_nz_16(value);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// LD Q, addr — Load Q from direct page (opcode 0x4C, 4 cycles)
@@ -460,7 +461,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u32::from(byte0) | (u32::from(byte1) << 8) | (u32::from(byte2) << 16) | (u32::from(byte3) << 24);
         self.registers.set_q(value);
         self.update_nz_32(value);
-        Ok(Cycles(4))
+        Ok(Cycles(4 + odd_penalty(addr, 4)))
     }
 
     /// EXG reg, reg — Exchange registers (opcode 0xA0, 1 cycle)
@@ -573,7 +574,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
-                Ok(Cycles(2))
+                Ok(Cycles(2 + odd_penalty(sp, 2)))
             }
             0x3 => {
                 // Push E (8-bit, 1 byte)
@@ -596,7 +597,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
-                Ok(Cycles(2))
+                Ok(Cycles(2 + odd_penalty(sp, 2)))
             }
             0x6 => {
                 // Push Q (32-bit, 4 bytes)
@@ -607,7 +608,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
                 self.bus.write(Addr::new(sp + 2), (value >> 16) as u8);
                 self.bus.write(Addr::new(sp + 3), (value >> 24) as u8);
-                Ok(Cycles(3))
+                Ok(Cycles(3 + odd_penalty(sp, 4)))
             }
             0x7 => {
                 // Push GP (8-bit, 1 byte)
@@ -680,7 +681,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 let value = u16::from(lsb) | (u16::from(msb) << 8);
                 self.registers.set_sp(sp + 2);
                 self.registers.set_d(value);
-                Ok(Cycles(2))
+                Ok(Cycles(2 + odd_penalty(sp, 2)))
             }
             0x3 => {
                 // Pop E (8-bit, 1 byte)
@@ -706,7 +707,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 let value = u16::from(lsb) | (u16::from(msb) << 8);
                 self.registers.set_sp(sp + 2);
                 self.registers.set_w(value);
-                Ok(Cycles(2))
+                Ok(Cycles(2 + odd_penalty(sp, 2)))
             }
             0x6 => {
                 // Pop Q (32-bit, 4 bytes)
@@ -719,7 +720,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
                     | (u32::from(byte2) << 16) | (u32::from(byte3) << 24);
                 self.registers.set_sp(sp + 4);
                 self.registers.set_q(value);
-                Ok(Cycles(3))
+                Ok(Cycles(3 + odd_penalty(sp, 4)))
             }
             0x7 => {
                 // Pop GP (8-bit, 1 byte)
@@ -801,7 +802,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             self.bus.write(Addr::new(sp + size1 + i), byte);
         }
 
-        Ok(Cycles(cycles))
+        Ok(Cycles(cycles + odd_penalty(sp, size1) + odd_penalty(sp + size1, size2)))
     }
 
     /// POP2 reg1, reg2 — Pop two registers from stack (opcode 0x59, 3-4 cycles)
@@ -844,7 +845,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.write_register(reg1, value1)?;
         self.write_register(reg2, value2)?;
 
-        Ok(Cycles(cycles))
+        Ok(Cycles(cycles + odd_penalty(sp, size1) + odd_penalty(sp + size1, size2)))
     }
 
     // Extended Addressing Mode Handlers (0xC0-0xCD)
@@ -875,7 +876,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u16::from(lsb) | (u16::from(msb) << 8);
         self.registers.set_d(value);
         self.update_nz_16(value);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// LD E, $addr — Load E from extended address (opcode 0xC3, 3 cycles)
@@ -904,7 +905,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u16::from(lsb) | (u16::from(msb) << 8);
         self.registers.set_w(value);
         self.update_nz_16(value);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// LD Q, $addr — Load Q from extended address (opcode 0xC6, 4 cycles)
@@ -917,7 +918,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let value = u32::from(byte0) | (u32::from(byte1) << 8) | (u32::from(byte2) << 16) | (u32::from(byte3) << 24);
         self.registers.set_q(value);
         self.update_nz_32(value);
-        Ok(Cycles(4))
+        Ok(Cycles(4 + odd_penalty(addr, 4)))
     }
 
     /// ST A, $addr — Store A to extended address (opcode 0xC7, 3 cycles)
@@ -943,7 +944,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         // Little-endian: LSB at lower address
         self.bus.write(Addr::new(addr), value as u8);
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// ST E, $addr — Store E to extended address (opcode 0xCA, 3 cycles)
@@ -969,7 +970,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         // Little-endian: LSB at lower address
         self.bus.write(Addr::new(addr), value as u8);
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-        Ok(Cycles(3))
+        Ok(Cycles(3 + odd_penalty(addr, 2)))
     }
 
     /// ST Q, $addr — Store Q to extended address (opcode 0xCD, 4 cycles)
@@ -981,7 +982,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
         self.bus.write(Addr::new(addr + 2), (value >> 16) as u8);
         self.bus.write(Addr::new(addr + 3), (value >> 24) as u8);
-        Ok(Cycles(4))
+        Ok(Cycles(4 + odd_penalty(addr, 4)))
     }
 
     // Indexed Addressing Mode Handlers (0xD0-0xDD)
@@ -1020,7 +1021,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             let value = u16::from(lsb) | (u16::from(msb) << 8);
             self.registers.set_d(value);
             self.update_nz_16(value);
-            Ok(Cycles(3 + extra_cycles))
+            Ok(Cycles(3 + extra_cycles + odd_penalty(addr, 2)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1061,7 +1062,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             let value = u16::from(lsb) | (u16::from(msb) << 8);
             self.registers.set_w(value);
             self.update_nz_16(value);
-            Ok(Cycles(3 + extra_cycles))
+            Ok(Cycles(3 + extra_cycles + odd_penalty(addr, 2)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1078,7 +1079,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             let value = u32::from(byte0) | (u32::from(byte1) << 8) | (u32::from(byte2) << 16) | (u32::from(byte3) << 24);
             self.registers.set_q(value);
             self.update_nz_32(value);
-            Ok(Cycles(4 + extra_cycles))
+            Ok(Cycles(4 + extra_cycles + odd_penalty(addr, 4)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1116,7 +1117,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Little-endian: LSB at lower address
             self.bus.write(Addr::new(addr), value as u8);
             self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-            Ok(Cycles(3 + extra_cycles))
+            Ok(Cycles(3 + extra_cycles + odd_penalty(addr, 2)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1154,7 +1155,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Little-endian: LSB at lower address
             self.bus.write(Addr::new(addr), value as u8);
             self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
-            Ok(Cycles(3 + extra_cycles))
+            Ok(Cycles(3 + extra_cycles + odd_penalty(addr, 2)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1170,7 +1171,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             self.bus.write(Addr::new(addr + 1), (value >> 8) as u8);
             self.bus.write(Addr::new(addr + 2), (value >> 16) as u8);
             self.bus.write(Addr::new(addr + 3), (value >> 24) as u8);
-            Ok(Cycles(4 + extra_cycles))
+            Ok(Cycles(4 + extra_cycles + odd_penalty(addr, 4)))
         } else {
             // Illegal indexed postbyte - execute as 1-cycle NOP
             Ok(Cycles(1))
@@ -1641,7 +1642,7 @@ mod tests {
         let postbyte = (0x6 << 4) | 0x7;
         let result = interp.exec_push2(postbyte);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Cycles(4)); // 32-bit + 8-bit = 4 cycles
+        assert_eq!(result.unwrap(), Cycles(5)); // 4, +1 because Q lands at an odd address
         assert_eq!(interp.registers.sp(), 0x0FFB); // SP decremented by 5
 
         assert_eq!(interp.bus.read(Addr::new(0x0FFB)), 0x78); // Q byte 0
@@ -1657,7 +1658,7 @@ mod tests {
         // POP2 Q, GP
         let result = interp.exec_pop2(postbyte);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Cycles(4)); // 32-bit + 8-bit = 4 cycles
+        assert_eq!(result.unwrap(), Cycles(5)); // 4, +1 for Q at an odd address
         assert_eq!(interp.registers.sp(), 0x1000); // SP restored
         assert_eq!(interp.registers.q(), 0x1234_5678); // Q restored
         assert_eq!(interp.registers.gp(), 0xCC); // GP restored

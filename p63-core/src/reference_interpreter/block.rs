@@ -5,6 +5,7 @@
 //! kept in the continuation, so interrupts are taken between units and the
 //! operation picks up where it stopped when the handler returns.
 
+use super::operand::odd_penalty;
 use super::{BlockContinuation, BlockOp, ReferenceInterpreter};
 use crate::{Addr, Bus, CpuError, Cycles, Flags};
 
@@ -26,44 +27,53 @@ impl<B: Bus> ReferenceInterpreter<B> {
 
     /// Copies up to 2 words; each word is a read and a write, so 1 cycle per word.
     fn movw_unit(&mut self, remaining: u32) -> Unit {
-        let n = remaining.min(2);
-        for _ in 0..n {
-            let w = self.bus.read_u16_le(Addr::new(self.registers.x()));
-            self.bus.write_u16_le(Addr::new(self.registers.y()), w);
+        let words = remaining.min(2);
+        let mut cycles = words;
+        for _ in 0..words {
+            let (src, dst) = (self.registers.x(), self.registers.y());
+            let word = self.bus.read_u16_le(Addr::new(src));
+            self.bus.write_u16_le(Addr::new(dst), word);
+            cycles += odd_penalty(src, 2) + odd_penalty(dst, 2);
             self.advance(2, 2);
         }
-        (n, n, false)
+        (words, cycles, false)
     }
 
     /// Writes up to 2 words in one cycle.
     fn fill_unit(&mut self, remaining: u32, value: u16) -> Unit {
-        let n = remaining.min(2);
-        for _ in 0..n {
-            self.bus.write_u16_le(Addr::new(self.registers.x()), value);
+        let words = remaining.min(2);
+        let mut cycles = 1;
+        for _ in 0..words {
+            let x = self.registers.x();
+            self.bus.write_u16_le(Addr::new(x), value);
+            cycles += odd_penalty(x, 2);
             self.advance(2, 0);
         }
-        (n, 1, false)
+        (words, cycles, false)
     }
 
     /// Compares up to 2 words, stopping at the first mismatch with X/Y left on it.
     fn cpy_unit(&mut self, remaining: u32) -> Unit {
-        let n = remaining.min(2);
-        for done in 0..n {
-            let a = u32::from(self.bus.read_u16_le(Addr::new(self.registers.x())));
-            let b = u32::from(self.bus.read_u16_le(Addr::new(self.registers.y())));
-            let r = a.wrapping_sub(b) & 0xFFFF;
+        let words = remaining.min(2);
+        let mut penalty = 0;
+        for done in 0..words {
+            let (src, dst) = (self.registers.x(), self.registers.y());
+            penalty += odd_penalty(src, 2) + odd_penalty(dst, 2);
+            let a = u32::from(self.bus.read_u16_le(Addr::new(src)));
+            let b = u32::from(self.bus.read_u16_le(Addr::new(dst)));
+            let diff = a.wrapping_sub(b) & 0xFFFF;
             let mut cc = self.registers.cc();
-            cc.set(Flags::N, r & 0x8000 != 0);
-            cc.set(Flags::Z, r == 0);
-            cc.set(Flags::V, ((a ^ b) & (a ^ r)) & 0x8000 != 0);
+            cc.set(Flags::N, diff & 0x8000 != 0);
+            cc.set(Flags::Z, diff == 0);
+            cc.set(Flags::V, ((a ^ b) & (a ^ diff)) & 0x8000 != 0);
             cc.set(Flags::C, a < b);
             self.registers.set_cc(cc);
             if a != b {
-                return (done, done + 1, true);
+                return (done, done + 1 + penalty, true);
             }
             self.advance(2, 2);
         }
-        (n, n, false)
+        (words, words + penalty, false)
     }
 
     /// Checks one byte; on a match X is left pointing at it.

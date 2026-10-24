@@ -74,7 +74,7 @@ fn sub_d_extended() {
     let mut c = cpu(&[0x12, 0xF2, 0x01, 0x45, 0x23, 0x01]);
     c.registers.set_d(0x1000);
     c.bus.write_u16_le(Addr::new(0x01_2345), 0x0001);
-    assert_eq!(step(&mut c, 6), 2);
+    assert_eq!(step(&mut c, 6), 3); // 2, +1 for the odd address
     assert_eq!(c.registers.d(), 0x0FFF);
 }
 

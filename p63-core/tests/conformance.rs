@@ -7,10 +7,6 @@ use p63_spec::{base_cycles, OPCODES};
 const PC: u32 = 0x1000;
 const SP: u32 = 0x8000;
 
-#[rustfmt::skip]
-const UNIMPLEMENTED: &[u8] = &[
-];
-
 /// Runs one instruction `op` with an all-zero postbyte and operands.
 fn run(op: u8) -> Result<u32, CpuError> {
     let mut ram = Ram::new(0x0100_0000);
@@ -33,21 +29,12 @@ fn every_opcode_matches_the_table() {
     let mut failures = Vec::new();
     for info in &OPCODES {
         let op = info.opcode;
-        let skipped = UNIMPLEMENTED.contains(&op);
-        let res = run(op);
         let name = format!("{op:#04X} {} {}", info.mnemonic, info.operands);
-
-        match (info.legal, skipped, res) {
-            // Illegal opcodes must be reported as such.
-            (false, _, Err(CpuError::IllegalOpcode(_))) => {}
-            (false, _, r) => failures.push(format!("{name}: illegal opcode executed: {r:?}")),
-
-            // Skipped legal opcodes must still be missing; remove them from the list once done.
-            (true, true, Err(CpuError::IllegalOpcode(_))) => {}
-            (true, true, r) => failures.push(format!("{name}: now implemented ({r:?}); remove from UNIMPLEMENTED")),
-
-            (true, false, Err(e)) => failures.push(format!("{name}: {e}")),
-            (true, false, Ok(c)) => {
+        match (info.legal, run(op)) {
+            (false, Err(CpuError::IllegalOpcode(_))) => {}
+            (false, r) => failures.push(format!("{name}: illegal opcode executed: {r:?}")),
+            (true, Err(e)) => failures.push(format!("{name}: {e}")),
+            (true, Ok(c)) => {
                 let (lo, hi) = base_cycles(op);
                 let ok = if is_variable(op) { c >= lo } else { (lo..=hi).contains(&c) };
                 if !ok {
@@ -57,11 +44,4 @@ fn every_opcode_matches_the_table() {
         }
     }
     assert!(failures.is_empty(), "{} conformance failures:\n{}", failures.len(), failures.join("\n"));
-}
-
-#[test]
-fn skip_list_only_names_legal_opcodes() {
-    for &op in UNIMPLEMENTED {
-        assert!(OPCODES[op as usize].legal, "{op:#04X} is illegal; it doesn't belong in UNIMPLEMENTED");
-    }
 }

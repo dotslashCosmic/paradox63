@@ -30,6 +30,14 @@ pub(super) fn alu_dest_bits(reg: u8) -> Option<u32> {
     }
 }
 
+/// Extra cycles for a `bytes`-wide access at `addr` over an aligned one.
+/// The bus moves 16 bits at a time, so an odd start costs one more transfer
+/// for 2- and 4-byte values (3-byte values take two transfers either way).
+pub(super) fn odd_penalty(addr: u32, bytes: u32) -> u32 {
+    let transfers = (addr + bytes - 1) / 2 - addr / 2 + 1;
+    transfers - bytes.div_ceil(2)
+}
+
 /// All-ones mask for a width in bits.
 pub(super) fn width_mask(bits: u32) -> u32 {
     if bits >= 32 {
@@ -141,7 +149,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             SRC_IMM => Some((self.fetch_le(bits / 8), 2)),
             SRC_MEM => {
                 let (addr, extra) = self.mem_operand()?;
-                Some((self.read_le(addr, bits / 8), 2 + extra))
+                Some((self.read_le(addr, bits / 8), 2 + extra + odd_penalty(addr, bits / 8)))
             }
             reg => self.read_register(reg).ok().map(|v| (v & mask, 1)),
         }
