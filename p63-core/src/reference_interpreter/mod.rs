@@ -11,6 +11,7 @@
 
 mod data_transfer;
 mod arithmetic;
+mod branch;
 mod operand;
 mod shift;
 
@@ -192,6 +193,9 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x1F => self.exec_clr(postbyte),
 
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
+            0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
+            0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
+
             0x20 | 0x22 => self.exec_asl(postbyte),
             0x21 => self.exec_asr(postbyte),
             0x23 => self.exec_lsr(postbyte),
