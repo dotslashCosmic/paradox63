@@ -45,7 +45,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         reg_bits(reg).map_or(1, |b| b / 8)
     }
 
-    /// Reads a register by its 6.6 code, zero-extended to 32 bits.
+    /// Reads a register by its 4-bit code, zero-extended to 32 bits.
     pub(super) fn read_register(&self, reg: u8) -> Result<u32, CpuError> {
         let r = &self.registers;
         Ok(match reg {
@@ -67,7 +67,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         })
     }
 
-    /// Writes a register by its 6.6 code, truncating to its width.
+    /// Writes a register by its 4-bit code, truncating to its width.
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn write_register(&mut self, reg: u8, value: u32) -> Result<(), CpuError> {
         let r = &mut self.registers;
@@ -140,24 +140,30 @@ impl<B: Bus> ReferenceInterpreter<B> {
         match src {
             SRC_IMM => Some((self.fetch_le(bits / 8), 2)),
             SRC_MEM => {
-                let (addr, extra) = match self.fetch_u8() {
-                    0x00 => {
-                        let off = self.fetch_u8();
-                        if off & 0xC0 != 0 {
-                            return None;
-                        }
-                        ((u32::from(self.registers.dp()) << 8) | u32::from(off), 0)
-                    }
-                    0x01 => (self.fetch_le(3), 0),
-                    0x02 => {
-                        let pb = self.fetch_u8();
-                        self.decode_indexed(pb)?
-                    }
-                    _ => return None,
-                };
+                let (addr, extra) = self.mem_operand()?;
                 Some((self.read_le(addr, bits / 8), 2 + extra))
             }
             reg => self.read_register(reg).ok().map(|v| (v & mask, 1)),
+        }
+    }
+
+    /// Decodes a memory mode byte and its address bytes: 0x00 DP, 0x01 extended, 0x02 indexed.
+    /// Returns `(address, extra_cycles)`, or `None` if the encoding is illegal.
+    pub(super) fn mem_operand(&mut self) -> Option<(u32, u32)> {
+        match self.fetch_u8() {
+            0x00 => {
+                let off = self.fetch_u8();
+                if off & 0xC0 != 0 {
+                    return None;
+                }
+                Some(((u32::from(self.registers.dp()) << 8) | u32::from(off), 0))
+            }
+            0x01 => Some((self.fetch_le(3), 0)),
+            0x02 => {
+                let pb = self.fetch_u8();
+                self.decode_indexed(pb)
+            }
+            _ => None,
         }
     }
 

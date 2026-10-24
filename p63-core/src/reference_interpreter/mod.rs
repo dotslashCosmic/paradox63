@@ -11,6 +11,7 @@
 
 mod data_transfer;
 mod arithmetic;
+mod bitops;
 mod branch;
 mod control;
 mod interrupt;
@@ -250,6 +251,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
             0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
             0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
+
+            0x90 => self.exec_bset(postbyte),
+            0x91 => self.exec_bclr(postbyte),
+            0x92 => self.exec_bchg(postbyte),
+            0x93 => self.exec_btst(postbyte),
+            0x94 | 0x95 => self.exec_jump_on_bit(opcode.0, postbyte),
+            0x96 => self.exec_dbnz(postbyte),
+            0x97 | 0x98 => self.exec_test_bit_branch(opcode.0, postbyte),
 
             0x70..=0x75 => self.exec_flag_op(opcode.0),
             0xB0 | 0xB1 => self.exec_wait(opcode.0),
