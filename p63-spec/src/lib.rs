@@ -29,7 +29,6 @@ mod tests {
 
     #[test]
     fn spec_version_is_pinned() {
-        // Bump deliberately when re-vendoring p63-docs.
         assert_eq!(SPEC_VERSION, "0.11.0");
     }
 

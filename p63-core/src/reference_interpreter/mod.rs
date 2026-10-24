@@ -12,6 +12,7 @@
 mod data_transfer;
 mod arithmetic;
 mod branch;
+mod control;
 mod operand;
 mod shift;
 
@@ -150,6 +151,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
     }
 
     /// Executes exactly one instruction.
+    #[allow(clippy::too_many_lines)] // one arm per opcode
     pub fn step(&mut self) -> Result<crate::Cycles, crate::CpuError> {
         // Fetch opcode and postbyte
         let (opcode, postbyte) = self.fetch_decode();
@@ -195,6 +197,13 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
             0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
             0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
+
+            0x40 => self.exec_jmp(postbyte),
+            0x41 => self.exec_jsr(postbyte),
+            0x42 => self.exec_rts(postbyte),
+            0x44 => self.exec_bsr(postbyte),
+            0x45 => self.exec_lbra(postbyte),
+            0x4D => self.exec_lbsr(postbyte),
 
             0x20 | 0x22 => self.exec_asl(postbyte),
             0x21 => self.exec_asr(postbyte),
@@ -487,8 +496,8 @@ mod tests {
         use crate::{Addr, CpuError, Opcode};
 
         let mut ram = Ram::new(1024);
-        // Write an arbitrary opcode (all are unimplemented in skeleton)
-        ram.write(Addr::new(0), 0x42);
+        // 0x4E is illegal
+        ram.write(Addr::new(0), 0x4E);
         ram.write(Addr::new(1), 0x00);
 
         let mut interp = ReferenceInterpreter::new(ram);
@@ -499,7 +508,7 @@ mod tests {
 
         match result {
             Err(CpuError::IllegalOpcode(opcode)) => {
-                assert_eq!(opcode, Opcode::new(0x42));
+                assert_eq!(opcode, Opcode::new(0x4E));
             }
             _ => panic!("Expected IllegalOpcode error"),
         }
