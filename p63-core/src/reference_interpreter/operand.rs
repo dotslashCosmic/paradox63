@@ -160,4 +160,20 @@ impl<B: Bus> ReferenceInterpreter<B> {
             reg => self.read_register(reg).ok().map(|v| (v & mask, 1)),
         }
     }
+
+    /// Decodes a `[count][reg]` postbyte (INC/DEC, shifts).
+    /// Returns `(reg, bits, count, cycles)`, or `None` if the encoding is illegal.
+    pub(super) fn count_operand(&mut self, postbyte: u8) -> Option<(u8, u32, u32, u32)> {
+        let reg = postbyte & 0x0F;
+        let bits = alu_dest_bits(reg)?;
+        let (count, cycles) = match postbyte >> 4 {
+            0 => (1, 1),
+            SRC_IMM => match self.fetch_u8() {
+                0 => return None,
+                c => (u32::from(c), 1 + u32::from(c)),
+            },
+            _ => return None,
+        };
+        Some((reg, bits, count, cycles))
+    }
 }

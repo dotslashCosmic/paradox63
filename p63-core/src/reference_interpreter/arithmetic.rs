@@ -27,9 +27,12 @@ enum Unary {
     Not,
     Neg,
     Clr,
+    Tst,
+    Com,
+    Swap,
 }
 
-fn sign_bit(bits: u32) -> u32 {
+pub(super) fn sign_bit(bits: u32) -> u32 {
     1 << (bits - 1)
 }
 
@@ -89,7 +92,10 @@ impl<B: Bus> ReferenceInterpreter<B> {
             }
             Alu::And | Alu::Or | Alu::Xor | Alu::Bit => {
                 flags.set(Flags::V, false);
-                flags.set(Flags::C, false);
+                // BIT leaves C alone
+                if op != Alu::Bit {
+                    flags.set(Flags::C, false);
+                }
                 match op {
                     Alu::And | Alu::Bit => d & s,
                     Alu::Or => d | s,
@@ -116,9 +122,12 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let mask = width_mask(bits);
         let mut flags = self.registers.cc();
         let result = match op {
-            Unary::Not => !d & mask,
+            Unary::Not | Unary::Com => !d & mask,
             Unary::Neg => 0u32.wrapping_sub(d) & mask,
             Unary::Clr => 0,
+            Unary::Tst => d,
+            // swap the nibbles of every byte
+            Unary::Swap => (((d & 0x0F0F_0F0F) << 4) | ((d & 0xF0F0_F0F0) >> 4)) & mask,
         };
         match op {
             // NEG: V if the input was the most negative value, C if the result is non-zero
@@ -126,29 +135,26 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 flags.set(Flags::V, d == sign_bit(bits));
                 flags.set(Flags::C, result != 0);
             }
-            Unary::Not | Unary::Clr => {
+            Unary::Com => {
+                flags.set(Flags::V, false);
+                flags.set(Flags::C, true);
+            }
+            Unary::Not | Unary::Clr | Unary::Tst | Unary::Swap => {
                 flags.set(Flags::V, false);
                 flags.set(Flags::C, false);
             }
         }
         Self::set_nz(&mut flags, result, bits);
         self.registers.set_cc(flags);
-        self.write_register(reg, result)?;
+        if !matches!(op, Unary::Tst) {
+            self.write_register(reg, result)?;
+        }
         Ok(Cycles(1))
     }
 
     /// INC/DEC, `[count][reg]` postbyte. C is unaffected.
     fn exec_inc_dec(&mut self, inc: bool, postbyte: u8) -> Result<Cycles, CpuError> {
-        let reg = postbyte & 0x0F;
-        let Some(bits) = alu_dest_bits(reg) else { return ILLEGAL };
-        let (count, cycles) = match postbyte >> 4 {
-            0 => (1, 1),
-            SRC_IMM => match self.fetch_u8() {
-                0 => return ILLEGAL,
-                c => (u32::from(c), 1 + u32::from(c)),
-            },
-            _ => return ILLEGAL,
-        };
+        let Some((reg, bits, count, cycles)) = self.count_operand(postbyte) else { return ILLEGAL };
         let d = self.read_register(reg)?;
         let mask = width_mask(bits);
         let sign = sign_bit(bits);
@@ -242,6 +248,21 @@ impl<B: Bus> ReferenceInterpreter<B> {
     /// BIT dest,src — AND that only sets flags (opcode 0x29)
     pub(super) fn exec_bit(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
         self.exec_alu(Alu::Bit, postbyte)
+    }
+
+    /// TST reg (opcode 0x28)
+    pub(super) fn exec_tst(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
+        self.exec_unary(Unary::Tst, postbyte)
+    }
+
+    /// COM reg (opcode 0x2A)
+    pub(super) fn exec_com(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
+        self.exec_unary(Unary::Com, postbyte)
+    }
+
+    /// SWAP reg (opcode 0x2B)
+    pub(super) fn exec_swap(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
+        self.exec_unary(Unary::Swap, postbyte)
     }
 
     /// CLR reg (opcode 0x1F)

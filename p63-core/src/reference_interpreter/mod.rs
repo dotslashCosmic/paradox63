@@ -12,6 +12,7 @@
 mod data_transfer;
 mod arithmetic;
 mod operand;
+mod shift;
 
 use crate::{Bus, Registers};
 
@@ -191,7 +192,17 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x1F => self.exec_clr(postbyte),
 
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
+            0x20 | 0x22 => self.exec_asl(postbyte),
+            0x21 => self.exec_asr(postbyte),
+            0x23 => self.exec_lsr(postbyte),
+            0x24 => self.exec_rol(postbyte),
+            0x25 => self.exec_ror(postbyte),
+            0x26 => self.exec_rcl(postbyte),
+            0x27 => self.exec_rcr(postbyte),
+            0x28 => self.exec_tst(postbyte),
             0x29 => self.exec_bit(postbyte),
+            0x2A => self.exec_com(postbyte),
+            0x2B => self.exec_swap(postbyte),
             0x2C => self.exec_ext(postbyte),
             0x2D => self.exec_zext(postbyte),
             0x2E => self.exec_maq(postbyte),
