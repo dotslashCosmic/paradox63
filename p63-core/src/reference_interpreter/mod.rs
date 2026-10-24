@@ -19,6 +19,7 @@ mod interrupt;
 pub use interrupt::Interrupt;
 mod operand;
 mod shift;
+mod special;
 mod system;
 
 use crate::{Bus, Registers};
@@ -251,6 +252,15 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
             0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
             0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
+
+            0x50 => self.exec_pack(postbyte),
+            0x51 => self.exec_unp(postbyte),
+            0x52 => self.exec_bext(postbyte),
+            0x53 => self.exec_bins(postbyte),
+            0x54 => self.exec_lea(postbyte),
+            0x5A => self.exec_ldi(postbyte),
+            0x5B => self.exec_movq(postbyte),
+            0x5D => self.exec_daa(postbyte),
 
             0x90 => self.exec_bset(postbyte),
             0x91 => self.exec_bclr(postbyte),
