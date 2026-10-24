@@ -12,6 +12,7 @@
 mod data_transfer;
 mod arithmetic;
 mod bitops;
+mod block;
 mod branch;
 mod control;
 mod interrupt;
@@ -50,6 +51,8 @@ pub struct BlockContinuation {
     pub remaining: u32,
     /// The type of block operation being performed
     pub operation: BlockOp,
+    /// Address of the interrupted block instruction
+    pub pc: u32,
 }
 
 /// Reference interpreter for the Paradox63 CPU.
@@ -253,6 +256,8 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
             0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
 
+            0x60..=0x64 => self.exec_block(opcode.0, postbyte),
+
             0x50 => self.exec_pack(postbyte),
             0x51 => self.exec_unp(postbyte),
             0x52 => self.exec_bext(postbyte),
@@ -440,6 +445,7 @@ mod tests {
             y: 0x2000,
             remaining: 42,
             operation: BlockOp::MoveByte,
+            pc: 0x100,
         };
         interp.set_block_continuation(Some(continuation.clone()));
 
@@ -472,6 +478,7 @@ mod tests {
                 y: 0,
                 remaining: 0,
                 operation: *op,
+                pc: 0,
             };
             assert_eq!(continuation.operation, *op);
         }

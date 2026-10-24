@@ -9,7 +9,6 @@ const SP: u32 = 0x8000;
 
 #[rustfmt::skip]
 const UNIMPLEMENTED: &[u8] = &[
-    0x60, 0x61, 0x62, 0x63, 0x64,
 ];
 
 /// Runs one instruction `op` with an all-zero postbyte and operands.
