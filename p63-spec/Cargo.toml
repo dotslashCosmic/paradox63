@@ -1,0 +1,7 @@
+[package]
+name = "p63-spec"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
