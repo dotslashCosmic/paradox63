@@ -55,6 +55,7 @@ fn ld_x_and_y_extended() {
 #[test]
 fn wait_idles_until_an_interrupt_is_pending() {
     let mut c = cpu(&[0xB0, 0x00, 0x71, 0x00]); // WAIT, SEC
+    c.registers.set_cc(Flags::I); // masked IRQ wakes WAIT without being taken
     assert_eq!(step(&mut c), 2);
     assert_eq!(c.halt(), Halt::Interrupt);
     for _ in 0..5 {
@@ -70,6 +71,7 @@ fn wait_idles_until_an_interrupt_is_pending() {
 #[test]
 fn waitv_ignores_interrupts_and_wakes_on_vblank() {
     let mut c = cpu(&[0xB1, 0x00, 0x71, 0x00]); // WAITV, SEC
+    c.registers.set_cc(Flags::I);
     step(&mut c);
     c.set_irq_pending(true);
     step(&mut c);

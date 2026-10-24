@@ -13,6 +13,9 @@ mod data_transfer;
 mod arithmetic;
 mod branch;
 mod control;
+mod interrupt;
+
+pub use interrupt::Interrupt;
 mod operand;
 mod shift;
 mod system;
@@ -48,6 +51,7 @@ pub struct BlockContinuation {
 }
 
 /// Reference interpreter for the Paradox63 CPU.
+#[allow(clippy::struct_excessive_bools)] // one per interrupt line
 pub struct ReferenceInterpreter<B: Bus> {
     /// CPU register state
     pub registers: Registers,
@@ -69,6 +73,9 @@ pub struct ReferenceInterpreter<B: Bus> {
 
     /// Set by WAIT/WAITV until the CPU is woken
     halt: Halt,
+
+    /// Inside an NMI handler (NMI doesn't nest)
+    nmi_active: bool,
 }
 
 /// Why the CPU is halted, if it is.
@@ -94,6 +101,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             firq_pending: false,
             block_continuation: None,
             halt: Halt::Running,
+            nmi_active: false,
         }
     }
 
@@ -109,6 +117,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.firq_pending = false;
         self.block_continuation = None;
         self.halt = Halt::Running;
+        self.nmi_active = false;
     }
 
     /// Returns why the CPU is halted, if it is.
@@ -183,12 +192,19 @@ impl<B: Bus> ReferenceInterpreter<B> {
     /// Executes exactly one instruction.
     #[allow(clippy::too_many_lines)] // one arm per opcode
     pub fn step(&mut self) -> Result<crate::Cycles, crate::CpuError> {
-        if self.halt == Halt::Interrupt && (self.nmi_pending || self.irq_pending || self.firq_pending) {
-            self.halt = Halt::Running;
-        }
-        if self.halt != Halt::Running {
-            // idle one cycle while halted
+        if self.halt == Halt::VBlank {
             return Ok(crate::Cycles(1));
+        }
+        if let Some(kind) = self.pending_interrupt() {
+            self.halt = Halt::Running;
+            return Ok(self.service(kind));
+        }
+        if self.halt == Halt::Interrupt {
+            // a masked interrupt still wakes WAIT, without being taken
+            if !(self.nmi_pending || self.irq_pending || self.firq_pending) {
+                return Ok(crate::Cycles(1));
+            }
+            self.halt = Halt::Running;
         }
 
         let (opcode, postbyte) = self.fetch_decode();
@@ -238,7 +254,9 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x70..=0x75 => self.exec_flag_op(opcode.0),
             0xB0 | 0xB1 => self.exec_wait(opcode.0),
             0xCE | 0xCF => self.exec_ld_index_extended(opcode.0, postbyte),
+            0xF0..=0xF3 => self.exec_interrupt_op(opcode.0),
             0xF4 => self.exec_reset(),
+            0x43 => self.exec_rti(postbyte),
             0xFE | 0xFF => self.exec_prefix(postbyte),
 
             0x40 => self.exec_jmp(postbyte),
@@ -592,6 +610,7 @@ mod tests {
         interp.registers.set_a(0x55);
         interp.registers.set_b(0xAA);
         interp.registers.set_x(0x0012_3456);
+        interp.registers.set_cc(crate::Flags::I);
         interp.set_irq_pending(true);
 
         // Execute step (will error)
