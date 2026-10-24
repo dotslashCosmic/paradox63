@@ -15,6 +15,7 @@ mod branch;
 mod control;
 mod operand;
 mod shift;
+mod system;
 
 use crate::{Bus, Registers};
 
@@ -65,6 +66,20 @@ pub struct ReferenceInterpreter<B: Bus> {
 
     /// Block operation continuation state for interruptibility
     block_continuation: Option<BlockContinuation>,
+
+    /// Set by WAIT/WAITV until the CPU is woken
+    halt: Halt,
+}
+
+/// Why the CPU is halted, if it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// Executing normally
+    Running,
+    /// WAIT: woken by any pending interrupt
+    Interrupt,
+    /// WAITV: woken by the next vertical blank
+    VBlank,
 }
 
 impl<B: Bus> ReferenceInterpreter<B> {
@@ -78,6 +93,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             irq_pending: false,
             firq_pending: false,
             block_continuation: None,
+            halt: Halt::Running,
         }
     }
 
@@ -92,6 +108,20 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.irq_pending = false;
         self.firq_pending = false;
         self.block_continuation = None;
+        self.halt = Halt::Running;
+    }
+
+    /// Returns why the CPU is halted, if it is.
+    #[must_use]
+    pub fn halt(&self) -> Halt {
+        self.halt
+    }
+
+    /// Wakes a CPU halted by WAITV. Called by the video side at the start of vertical blank.
+    pub fn signal_vblank(&mut self) {
+        if self.halt == Halt::VBlank {
+            self.halt = Halt::Running;
+        }
     }
 
     /// Returns whether an NMI is pending.
@@ -153,7 +183,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
     /// Executes exactly one instruction.
     #[allow(clippy::too_many_lines)] // one arm per opcode
     pub fn step(&mut self) -> Result<crate::Cycles, crate::CpuError> {
-        // Fetch opcode and postbyte
+        if self.halt == Halt::Interrupt && (self.nmi_pending || self.irq_pending || self.firq_pending) {
+            self.halt = Halt::Running;
+        }
+        if self.halt != Halt::Running {
+            // idle one cycle while halted
+            return Ok(crate::Cycles(1));
+        }
+
         let (opcode, postbyte) = self.fetch_decode();
 
         // Dispatch to instruction handler based on opcode
@@ -197,6 +234,12 @@ impl<B: Bus> ReferenceInterpreter<B> {
             // Shift/Rotate and Extension Instructions (0x20-0x2F)
             0x30..=0x3F => self.exec_short_branch(opcode.0, postbyte),
             0x80..=0x8D => self.exec_long_branch(opcode.0, postbyte),
+
+            0x70..=0x75 => self.exec_flag_op(opcode.0),
+            0xB0 | 0xB1 => self.exec_wait(opcode.0),
+            0xCE | 0xCF => self.exec_ld_index_extended(opcode.0, postbyte),
+            0xF4 => self.exec_reset(),
+            0xFE | 0xFF => self.exec_prefix(postbyte),
 
             0x40 => self.exec_jmp(postbyte),
             0x41 => self.exec_jsr(postbyte),
@@ -522,7 +565,7 @@ mod tests {
         use crate::Addr;
 
         let mut ram = Ram::new(1024);
-        ram.write(Addr::new(0x100), 0xFF);
+        ram.write(Addr::new(0x100), 0x4E);
         ram.write(Addr::new(0x101), 0xAA);
 
         let mut interp = ReferenceInterpreter::new(ram);

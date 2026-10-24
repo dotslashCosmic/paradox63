@@ -13,6 +13,6 @@ pub mod types;
 pub use bus::{Bus, Ram};
 pub use error::CpuError;
 pub use flags::Flags;
-pub use reference_interpreter::{BlockContinuation, BlockOp, ReferenceInterpreter};
+pub use reference_interpreter::{BlockContinuation, BlockOp, Halt, ReferenceInterpreter};
 pub use registers::Registers;
 pub use types::{Addr, Cycles, Opcode};
