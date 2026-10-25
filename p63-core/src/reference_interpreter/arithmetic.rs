@@ -334,26 +334,32 @@ impl<B: Bus> ReferenceInterpreter<B> {
 
     // Extension and specialized arithmetic (opcodes 0x2C-0x2F, 0x5C, 0x55)
 
-    /// EXT A,D — Sign-extend A into D (opcode 0x2C, 1 cycle). N and Z only.
-    pub(super) fn exec_ext(&mut self, _postbyte: u8) -> Result<Cycles, CpuError> {
-        let result = sext(u32::from(self.registers.a()), 8) & 0xFFFF;
-        self.registers.set_d(result as u16);
+    /// Extends src into dest, postbyte `[src][dest]` (`EXT A,D` = 0x02).
+    fn exec_extend(&mut self, signed: bool, postbyte: u8) -> Result<Cycles, CpuError> {
+        let (src, dest) = (postbyte >> 4, postbyte & 0x0F);
+        let (Some(src_bits), Some(dest_bits)) = (reg_bits(src), alu_dest_bits(dest)) else { return ILLEGAL };
+        let value = self.read_register(src)? & width_mask(src_bits);
+        let value = if signed { sext(value, src_bits) } else { value };
+        let result = value & width_mask(dest_bits);
+        self.write_register(dest, result)?;
         let mut flags = self.registers.cc();
-        Self::set_nz(&mut flags, result, 16);
+        Self::set_nz(&mut flags, result, dest_bits);
+        if !signed {
+            flags.set(Flags::V, false);
+            flags.set(Flags::C, false);
+        }
         self.registers.set_cc(flags);
         Ok(Cycles(1))
     }
 
-    /// ZEXT A,D — Zero-extend A into D (opcode 0x2D, 1 cycle).
-    pub(super) fn exec_zext(&mut self, _postbyte: u8) -> Result<Cycles, CpuError> {
-        let result = u16::from(self.registers.a());
-        self.registers.set_d(result);
-        let mut flags = self.registers.cc();
-        Self::set_nz(&mut flags, u32::from(result), 16);
-        flags.set(Flags::V, false);
-        flags.set(Flags::C, false);
-        self.registers.set_cc(flags);
-        Ok(Cycles(1))
+    /// EXT src,dest — sign-extend (opcode 0x2C, 1 cycle). N and Z only.
+    pub(super) fn exec_ext(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
+        self.exec_extend(true, postbyte)
+    }
+
+    /// ZEXT src,dest — zero-extend (opcode 0x2D, 1 cycle). N Z set, V C cleared.
+    pub(super) fn exec_zext(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
+        self.exec_extend(false, postbyte)
     }
 
     /// MAQ D,W — Q = Q + D × W (opcode 0x2E, 2 cycles).
@@ -808,7 +814,7 @@ mod tests {
 
         interp.registers.set_a(0x42); // Positive (bit 7 = 0)
 
-        let result = interp.exec_ext(0x00);
+        let result = interp.exec_ext(0x02);
         assert!(result.is_ok());
         assert_eq!(interp.registers.d(), 0x0042); // High byte = 0x00
     }
@@ -819,7 +825,7 @@ mod tests {
 
         interp.registers.set_a(0x80); // Negative (bit 7 = 1)
 
-        let result = interp.exec_ext(0x00);
+        let result = interp.exec_ext(0x02);
         assert!(result.is_ok());
         assert_eq!(interp.registers.d(), 0xFF80); // High byte = 0xFF
     }
@@ -830,7 +836,7 @@ mod tests {
 
         interp.registers.set_a(0xFF);
 
-        let result = interp.exec_zext(0x00);
+        let result = interp.exec_zext(0x02);
         assert!(result.is_ok());
         assert_eq!(interp.registers.d(), 0x00FF); // High byte = 0x00
     }
