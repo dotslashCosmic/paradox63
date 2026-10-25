@@ -1,0 +1,430 @@
+; pong.p63 - Paradox63 Pong from 8086pong.asm
+; Left paddle: D-pad Up/Down.  Right paddle: AI.  First to 5 wins.
+; START serves at power-up and restarts after a game.
+; Needs: p63_hw.inc v0.10.0
+
+INCLUDE "p63_hw.inc"                ; EQU-only, emits no bytes
+
+; tuning
+PADDLE_H        EQU 32              ; two 8x16 sprites stacked
+PADDLE_SPD      EQU 3               ; player pixels per frame
+AI_SPD          EQU 2
+PADDLE_MIN      EQU 16              ; top edge limits (playfield is y 16..231)
+PADDLE_MAX      EQU 200             ; 232 - PADDLE_H
+PADDLE_LIM      EQU 201             ; PADDLE_MAX + 1
+PADDLE_START    EQU 108
+PADDLE_L_X      EQU 8
+PADDLE_R_X      EQU 304             ; > 255, so it needs the X-high bit
+
+BALL_SIZE       EQU 8
+BALL_MIN_Y      EQU 16
+BALL_MAX_Y      EQU 224             ; 232 - BALL_SIZE
+BALL_VY         EQU 2
+SPD_START       EQU 3               ; ball x speed, grows by 1 per paddle hit
+SPD_MAX         EQU 6               ; must stay <= 8 (see MOVE_BALL)
+ENGLISH_MID     EQU 12              ; paddle half (16) - ball half (4)
+
+HIT_L_X         EQU 16              ; ball left edge touches left paddle's face
+GOAL_L_X        EQU 8               ; ball is past the left paddle
+HIT_R_X         EQU 296             ; ball right edge touches right paddle's face
+GOAL_R_X        EQU 312             ; ball is past the right paddle
+
+SERVE_X         EQU 156
+SERVE_FRAMES    EQU 30              ; half a second at 60 Hz
+WIN_SCORE       EQU 5
+PIP_Y           EQU 4
+NUM_PIPS        EQU 10              ; 5 per player
+V_ON            EQU %00100001       ; bit0 video on, bit5 sprites on
+
+; game state: direct-page variables (DP = 0, so $10 means $000010)
+BX      EQU $10                     ; word: ball x, 0..311 ($10 low, $11 high)
+BY      EQU $12                     ; ball y
+DIRX    EQU $13                     ; 1 = moving right, 0 = left
+DIRY    EQU $14                     ; 1 = moving down,  0 = up
+PL      EQU $15                     ; left paddle top y
+PR      EQU $16                     ; right paddle top y
+SCL     EQU $17                     ; left score
+SCR     EQU $18                     ; right score
+TIMER   EQU $19                     ; serve countdown, frames
+SPD     EQU $1A                     ; word: ball x speed ($1A low, $1B high)
+
+; OAM map: which sprite slot is what
+BALL_OAM EQU SPR_OAM                ; slot 0
+PL_OAM   EQU SPR_OAM+8              ; slots 1-2
+PR_OAM   EQU SPR_OAM+24             ; slots 3-4
+PIP_BASE EQU SPR_OAM+40             ; slots 5-9 left pips, 10-14 right pips
+BALL_X   EQU BALL_OAM+SPR_X
+BALL_Y   EQU BALL_OAM+SPR_Y
+BALL_XH  EQU BALL_OAM+SPR_XH
+SECOND_Y EQU SPR_Y+SPR_SIZE         ; Y byte of the entry after this one
+PIP_L    EQU PIP_BASE-8             ; for SHOW_PIP: first left pip - 8
+PIP_R    EQU PIP_BASE+32            ; for SHOW_PIP: first right pip - 8
+
+; VRAM we touch
+TILE1     EQU VRAM_PATTERN+32       ; tile n is at VRAM_PATTERN + n*32
+PAL_WHITE EQU VRAM_PALETTE+17       ; palette 1, colour 1
+PAL_GREEN EQU VRAM_PALETTE+33       ; palette 2, colour 1
+PAL_RED   EQU VRAM_PALETTE+49       ; palette 3, colour 1
+
+; Program starts here
+ORG $000100
+
+START:
+        CLR A
+        MOV DP,A                    ; make sure DP = 0
+        LD A,#$FF                   ; palette colours (RGB332)
+        ST A,PAL_WHITE
+        LD A,#$5E
+        ST A,PAL_GREEN
+        LD A,#$E5
+        ST A,PAL_RED
+        LD X,#TILE1                 ; tiles 1 and 2 = solid colour 1
+        FILL X,#$1111,#32           ; 64 bytes = 32 words
+        LD X,#SPR_OAM               ; hide all 256 sprites
+        LD A,#255
+        LD GP,#0                    ; DBNZ wraps: 256 passes
+.HIDE:  ST A,SPR_Y,X
+        LEA X,SPR_SIZE,X
+        DBNZ GP,.HIDE
+
+        LD X,#BALL_OAM              ; ball: 8x8, white
+        CLR A
+        LD B,#1
+        CLR W
+        JSR INIT_SPRITE
+
+        LD X,#PL_OAM                ; left paddle: 2 x (8x16), green
+        LD B,#2
+        LD W,#PADDLE_L_X
+        LD A,#SPR_SZ_816
+        JSR INIT_SPRITE
+        LD A,#SPR_SZ_816
+        JSR INIT_SPRITE
+
+        LD X,#PR_OAM                ; right paddle: 2 x (8x16), red
+        LD B,#3
+        LD W,#PADDLE_R_X
+        LD A,#SPR_SZ_816
+        JSR INIT_SPRITE
+        LD A,#SPR_SZ_816
+        JSR INIT_SPRITE
+
+        LD X,#PIP_BASE              ; score pips, left player: green, left to right
+        LD B,#2
+        LD W,#8
+        LD GP,#WIN_SCORE
+.LPIP:  CLR A
+        JSR INIT_SPRITE
+        ADD W,#12
+        DBNZ GP,.LPIP
+        LD B,#3                     ; right player: red, right to left
+        LD W,#304
+        LD GP,#WIN_SCORE
+.RPIP:  CLR A
+        JSR INIT_SPRITE
+        SUB W,#12
+        DBNZ GP,.RPIP
+
+        JSR NEW_GAME
+        JSR DRAW
+        LD A,#V_ON
+        ST A,V_CTRL                 ; picture on
+        JSR WAIT_START              ; RAND8 spins until START: random seed
+        JSR NEW_GAME
+
+; main loop: one pass per frame
+MAIN:
+        WAITV                       ; sleep until vertical blank
+        JSR MOVE_PLAYER
+        LD A,<TIMER
+        BEQ .LIVE
+        DEC A                       ; serve pause: ball and AI frozen
+        ST A,<TIMER
+        BRA .DRAW
+.LIVE:  JSR MOVE_AI
+        JSR MOVE_BALL
+.DRAW:  JSR DRAW
+        BRA MAIN
+
+; Clamp a paddles top y. In: A   Out: A in PADDLE_MIN..PADDLE_MAX
+CLAMP_PADDLE:
+        CMP A,#PADDLE_MIN
+        BCS .LOW                    ; A < min
+        CMP A,#PADDLE_LIM
+        BCC .HIGH                   ; A > max
+        RTS
+.LOW:   LD A,#PADDLE_MIN
+        RTS
+.HIGH:  LD A,#PADDLE_MAX
+        RTS
+
+; Player: bitset D-pad Up/Down
+MOVE_PLAYER:
+        LD A,KB_PAD
+        LD B,<PL
+        BIT A,#BTN_UP
+        BEQ .NO_UP
+        SUB B,#PADDLE_SPD
+.NO_UP: BIT A,#BTN_DOWN
+        BEQ .NO_DN
+        ADD B,#PADDLE_SPD
+.NO_DN: MOV A,B
+        JSR CLAMP_PADDLE
+        ST A,<PL
+        RTS
+
+; AI: only chases while the ball is coming at it, with a +-4 dead zone so the paddle doesn't jitter.
+MOVE_AI:
+        LD A,<DIRX
+        BEQ .RET                    ; ball heading away: idle
+        LD A,<BY
+        SUB A,#12                   ; where the paddle top should be
+        LD B,<PR
+        ADD B,#4
+        CMP A,B                     ; target > PR + 4 ?
+        BHI .DOWN
+        SUB B,#8
+        CMP A,B                     ; target < PR - 4 ?
+        BCS .UP
+.RET:   RTS
+.DOWN:  LD A,<PR
+        ADD A,#AI_SPD
+        BRA .STORE
+.UP:    LD A,<PR
+        SUB A,#AI_SPD
+.STORE: JSR CLAMP_PADDLE
+        ST A,<PR
+        RTS
+
+; Ball
+MOVE_BALL:
+        ; vertical: bounce off ceiling and floor
+        LD A,<BY
+        LD B,<DIRY
+        BEQ .GO_UP
+        ADD A,#BALL_VY
+        CMP A,#BALL_MAX_Y
+        BCS .Y_DONE                 ; still above the floor
+        LD A,#BALL_MAX_Y
+        CLR B
+        ST B,<DIRY                  ; now going up
+        BRA .Y_DONE
+.GO_UP: SUB A,#BALL_VY
+        CMP A,#BALL_MIN_Y
+        BCC .Y_DONE                 ; still below the ceiling
+        LD A,#BALL_MIN_Y
+        LD B,#1
+        ST B,<DIRY                  ; now going down
+.Y_DONE:
+        ST A,<BY
+
+        ; horizontal.  Left goal is tested at x < 8 and the speed is <= 8, so x can never wrap below zero.
+        LD B,<DIRX
+        BEQ .LEFT
+        LD W,<SPD
+        LD D,<BX
+        ADD D,W
+        ST D,<BX
+        CMP D,#GOAL_R_X
+        LBCC GOAL_LEFT              ; past the right paddle: left player scores
+        CMP D,#HIT_R_X
+        BCS .DONE                   ; hasn't reached the paddle yet
+        LD B,<PR
+        JSR PADDLE_HIT
+        BEQ .DONE                   ; missed
+        LD D,#HIT_R_X               ; hit: pop out in front of the paddle
+        ST D,<BX
+        CLR A
+        ST A,<DIRX                  ; now going left
+        JMP SPEED_UP                ; tail call
+.LEFT:  LD W,<SPD
+        LD D,<BX
+        SUB D,W
+        ST D,<BX
+        CMP D,#GOAL_L_X
+        LBCS GOAL_RIGHT             ; past the left paddle: right player scores
+        CMP D,#HIT_L_X
+        BCC .DONE                   ; hasn't reached the paddle yet
+        LD B,<PL
+        JSR PADDLE_HIT
+        BEQ .DONE
+        LD D,#HIT_L_X
+        ST D,<BX
+        LD A,#1
+        ST A,<DIRX                  ; now going right
+        JMP SPEED_UP
+.DONE:  RTS
+
+; Does the ball overlap a paddle vertically?  Also sets DIRY from where it hit (upper half sends it up, lower half down).
+; In: B = paddle top y.   Out: Z=0 hit, Z=1 miss.   Trashes: A, B, E
+PADDLE_HIT:
+        MOV E,B                     ; E = paddle top
+        LD A,<BY
+        ADD A,#BALL_SIZE            ; A = ball bottom edge
+        CMP A,B
+        BLS .MISS                   ; ball entirely above the paddle
+        ADD B,#PADDLE_H             ; B = paddle bottom edge
+        LD A,<BY                    ; A = ball top edge
+        CMP A,B
+        BCC .MISS                   ; ball entirely below the paddle
+        ADD E,#ENGLISH_MID          ; E = paddle top + 12: centres line up
+        LD B,#1                     ; default: send it down
+        CMP A,E
+        BCC .SET                    ; ball top >= E: lower half
+        CLR B                       ; upper half: send it up
+.SET:   ST B,<DIRY
+        LD A,#1                     ; Z = 0: hit
+        RTS
+.MISS:  LD A,#0                     ; Z = 1: miss
+        RTS
+
+; Rally gets faster, up to SPD_MAX.
+SPEED_UP:
+        LD W,<SPD
+        CMP W,#SPD_MAX
+        BCC .RET                    ; already at max
+        INC W
+        ST W,<SPD
+.RET:   RTS
+
+; Scoring, serving, game flow.  GOAL_x and GAME_OVER are reached by jumps from MOVE_BALL (tail calls), so their RTS returns straight to MAIN.
+GOAL_LEFT:                          ; the LEFT player scored
+        LD A,<SCL
+        INC A
+        ST A,<SCL
+        LD X,#PIP_L
+        JSR SHOW_PIP
+        LD A,<SCL
+        CMP A,#WIN_SCORE
+        LBCC GAME_OVER              ; score >= WIN_SCORE
+        LD E,#1                     ; serve toward the player who just lost
+        JMP SERVE
+
+GOAL_RIGHT:                         ; the RIGHT player scored
+        LD A,<SCR
+        INC A
+        ST A,<SCR
+        LD X,#PIP_R
+        JSR SHOW_PIP
+        LD A,<SCR
+        CMP A,#WIN_SCORE
+        LBCC GAME_OVER
+        LD E,#0
+        JMP SERVE
+
+; Light up the newest pip.
+; In: X = first pip of this player - 8,  A = new score (1..5).   Trashes: A, X
+SHOW_PIP:
+        ASL A,#3                    ; score * 8 = byte offset
+        SMODX X,A
+        LD A,#PIP_Y
+        ST A,SPR_Y,X
+        RTS
+
+GAME_OVER:
+        LD A,#255
+        ST A,BALL_Y                 ; hide the ball; the pips show who won
+        JSR WAIT_START
+        JMP NEW_GAME
+
+; RNG Spin until START is pressed.   Trashes: A
+WAIT_START:
+        WAITV
+        JSR RAND8
+        LD A,KB_PAD
+        BIT A,#BTN_START
+        BEQ WAIT_START
+        RTS
+
+; Zero the scores, hide the pips, centre the paddles, serve to the right.
+NEW_GAME:
+        CLR A
+        ST A,<SCL
+        ST A,<SCR
+        LD X,#PIP_BASE
+        LD A,#255
+        LD GP,#NUM_PIPS
+.HIDE:  ST A,SPR_Y,X
+        LEA X,SPR_SIZE,X
+        DBNZ GP,.HIDE
+        LD A,#PADDLE_START
+        ST A,<PL
+        ST A,<PR
+        LD E,#1
+        JMP SERVE
+
+; Put the ball in the middle at a random height and pause.
+; In: E = direction (1 right, 0 left).   Trashes: A, B, W
+SERVE:
+        ST E,<DIRX
+        JSR RAND8                   ; A = random byte (B preserved)
+        MOV B,A
+        LSR B,#7                    ; top bit picks up/down
+        ST B,<DIRY
+        AND A,#$7F
+        ADD A,#64                   ; y = 64..191
+        ST A,<BY
+        LD D,#SERVE_X
+        ST D,<BX
+        LD W,#SPD_START
+        ST W,<SPD
+        LD A,#SERVE_FRAMES
+        ST A,<TIMER
+        RTS
+
+; Drawing: sprites stay on screen by themselves, so we only update positions.
+
+; Fill in a sprite's fixed fields and step to the next OAM entry.
+; In: X = entry, A = attr, B = palette, W = x position (0..319)
+; Out: X = next entry.   Trashes: A.   (tile is always 1)
+INIT_SPRITE:
+        ST A,SPR_ATTR,X
+        ST B,SPR_PAL,X
+        ST F,SPR_X,X                ; x low byte
+        ST E,SPR_XH,X               ; x bit 8
+        LD A,#1
+        ST A,SPR_TILE,X
+        CLR A
+        ST A,SPR_EXT,X
+        LEA X,SPR_SIZE,X
+        RTS
+
+; In: X = OAM entry of the paddle's top half, A = paddle top y.  Trashes: A
+DRAW_PADDLE:
+        ST A,SPR_Y,X
+        ADD A,#16
+        ST A,SECOND_Y,X
+        RTS
+
+DRAW:
+        LD X,#PL_OAM
+        LD A,<PL
+        JSR DRAW_PADDLE
+        LD X,#PR_OAM
+        LD A,<PR
+        JSR DRAW_PADDLE
+        LD D,<BX                    ; A = bit 8, B = low byte
+        ST B,BALL_X
+        ST A,BALL_XH
+        LD A,<BY
+        ST A,BALL_Y
+        RTS
+
+; 8-bit xorshift PRNG (your prng.p63, unchanged).  Out: A.
+RAND8:
+        PUSH B
+        LD A,PRNG_8
+        MOV B,A
+        LSL A,#1
+        XOR A,B
+        MOV B,A
+        LSR A,#7
+        XOR A,B
+        MOV B,A
+        LSL A,#3
+        XOR A,B
+        ST A,PRNG_8
+        POP B
+        RTS
+
+PRNG_8: .BYTE $FB
