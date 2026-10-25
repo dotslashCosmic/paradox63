@@ -91,6 +91,11 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let target = self.bus.read_u24_le(Addr::new(vector));
         self.registers.set_pc(target);
 
+        if self.frames.len() >= super::MAX_FRAMES {
+            self.frames.remove(0);
+        }
+        self.frames.push((kind, self.block_continuation.take()));
+
         if kind == Interrupt::Nmi {
             // edge-triggered: taken once per assertion
             self.nmi_pending = false;
@@ -134,7 +139,17 @@ impl<B: Bus> ReferenceInterpreter<B> {
             3
         };
         self.registers.set_cc(cc);
-        self.nmi_active = false;
+        // back to what was interrupted: its block operation, and the NMI guard only
+        // if this was the NMI handler
+        match self.frames.pop() {
+            Some((kind, block)) => {
+                self.block_continuation = block;
+                if kind == Interrupt::Nmi {
+                    self.nmi_active = false;
+                }
+            }
+            None => self.nmi_active = false,
+        }
         Ok(Cycles(cycles))
     }
 }

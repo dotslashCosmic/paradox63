@@ -55,7 +55,8 @@ pub fn lex(line: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
                 continue;
             }
-            let v = i64::from_str_radix(&digits, radix).map_err(|_| format!("bad number `{}`", &line[i..j.min(line.len())]))?;
+            let v = i64::from_str_radix(&digits, radix)
+                .map_err(|_| format!("bad number `{}`", chars[i..j].iter().collect::<String>()))?;
             toks.push(Tok::Num(v));
             i = j;
             continue;
@@ -121,7 +122,7 @@ impl Expr {
             Expr::Num(n) => *n,
             Expr::Here => env.here,
             Expr::Sym(s) => *env.symbols.get(s).ok_or_else(|| EvalError::Undefined(s.clone()))?,
-            Expr::Neg(e) => -e.eval(env)?,
+            Expr::Neg(e) => e.eval(env)?.wrapping_neg(),
             Expr::Not(e) => !e.eval(env)?,
             Expr::Bin(op, a, b) => {
                 let (a, b) = (a.eval(env)?, b.eval(env)?);
@@ -130,8 +131,8 @@ impl Expr {
                     "-" => a.wrapping_sub(b),
                     "*" => a.wrapping_mul(b),
                     "/" | "%" if b == 0 => return Err(EvalError::Other("division by zero".into())),
-                    "/" => a / b,
-                    "%" => a % b,
+                    "/" => a.wrapping_div(b),
+                    "%" => a.wrapping_rem(b),
                     "<<" => a << (b & 63),
                     ">>" => a >> (b & 63),
                     "&" => a & b,
@@ -149,13 +150,22 @@ pub struct ExprParser<'a> {
     pos: usize,
     /// Prefix for `.local` names (the enclosing global label).
     scope: &'a str,
+    /// Brackets and prefix operators open right now
+    depth: usize,
+    /// Binary operators seen so far
+    ops: usize,
 }
+
+/// Deeper nesting than this is an error rather than a stack overflow.
+const MAX_DEPTH: usize = 256;
+/// Most binary operators in one expression.
+const MAX_OPS: usize = 1000;
 
 const LEVELS: [&[&str]; 5] = [&["|"], &["^"], &["&"], &["<<", ">>"], &["+", "-"]];
 
 impl<'a> ExprParser<'a> {
     pub fn new(toks: &'a [Tok], scope: &'a str) -> Self {
-        Self { toks, pos: 0, scope }
+        Self { toks, pos: 0, scope, depth: 0, ops: 0 }
     }
 
     pub fn done(&self) -> bool {
@@ -180,6 +190,7 @@ impl<'a> ExprParser<'a> {
         let mut lhs = self.level(n + 1)?;
         while let Some(p) = self.peek_punct().filter(|p| LEVELS[n].contains(p)) {
             self.pos += 1;
+            self.count_op()?;
             let rhs = self.level(n + 1)?;
             lhs = Expr::Bin(p, Box::new(lhs), Box::new(rhs));
         }
@@ -190,13 +201,33 @@ impl<'a> ExprParser<'a> {
         let mut lhs = self.unary()?;
         while let Some(p) = self.peek_punct().filter(|p| ["*", "/", "%"].contains(p)) {
             self.pos += 1;
+            self.count_op()?;
             let rhs = self.unary()?;
             lhs = Expr::Bin(p, Box::new(lhs), Box::new(rhs));
         }
         Ok(lhs)
     }
 
+    /// Each binary operator nests the tree one level deeper.
+    fn count_op(&mut self) -> Result<(), String> {
+        self.ops += 1;
+        if self.ops > MAX_OPS {
+            return Err("expression too long".into());
+        }
+        Ok(())
+    }
+
     fn unary(&mut self) -> Result<Expr, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err("expression nested too deeply".into());
+        }
+        self.depth += 1;
+        let e = self.unary_inner();
+        self.depth -= 1;
+        e
+    }
+
+    fn unary_inner(&mut self) -> Result<Expr, String> {
         match self.peek_punct() {
             Some("-") => {
                 self.pos += 1;

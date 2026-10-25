@@ -3,6 +3,7 @@
 SYS_TESTS:
     JSR SYS_MEMMAP
     JSR SYS_INTERRUPTS
+    JSR SYS_EDGES
     JSR SYS_TIMING
     JSR SYS_AUDIO
     RTS
@@ -478,6 +479,120 @@ H_IRQ:
     ST A,V_IRQST
     RTI
 
+; edge cases: the stack wrapping round the bottom of memory, and a block copy that an
+; interrupt handler breaks into with a block copy of its own
+SYS_EDGES:
+    JSR T_SECT
+    .BYTE "EDGE CASES", 0
+    LD A,#FL_I|FL_F                 ; nothing may interrupt while SP is down there
+    MOV CC,A
+    LD Q,$FFFFFC                    ; the IRQ and FIRQ vector bytes the pushes land on
+    ST Q,EG_VECS
+    MOV Q,SP
+    ST Q,SP0
+    WAITV
+    LD D,#$BEEF
+    LD X,#1
+    MOV SP,X
+    PUSH D                          ; 1 - 2: SP wraps to $FFFFFF
+    MOV Q,SP
+    ST Q,EG_SP1
+    LD A,$FFFFFF
+    ST A,EG_BYTE
+    POP D                           ; and back over the top to 1
+    MOV Q,SP
+    ST Q,EG_SP2
+    LD X,#3
+    MOV SP,X
+    LD Q,#$11223344
+    PUSH2 Q,X                       ; 3 - 7: SP wraps to $FFFFFC
+    MOV Q,SP
+    ST Q,EG_SP3
+    LD A,V_LINE                     ; all that took a few cycles, still line 240
+    ST A,EG_LINE
+    LD Q,SP0
+    MOV X,Q
+    MOV SP,X
+    LD Q,EG_VECS
+    ST Q,$FFFFFC
+    LD Q,EG_SP1
+    JSR T_V32
+    .LONG $FFFFFF
+    LD A,EG_BYTE                    ; D's low byte went to the top of memory
+    JSR T_V8
+    .BYTE $EF
+    LD Q,EG_SP2
+    JSR T_V32
+    .LONG 1
+    LD Q,EG_SP3
+    JSR T_V32
+    .LONG $FFFFFC
+    LD A,EG_LINE
+    JSR T_V8
+    .BYTE 240
+
+    ; a raster IRQ lands one line into a 1137-byte MOVB; the handler does a MOVB of its own
+    LD X,#BIG2                      ; destination zeroed, source a pattern
+    FILL [X],#0,#700
+    LD X,#BIG
+    FILL [X],#$A55A,#600
+    LD Q,#0
+    ST Q,EG_HD
+    CLR A
+    ST A,ISR_HITS
+    ST A,EG_MID
+    LD X,#VEC_IRQ
+    LD Y,#H_EDGE
+    JSR SET_VECTOR
+    LD A,#$03
+    ST A,V_IRQST
+    LD A,#241
+    ST A,V_IRQLINE
+    LD A,#$02
+    ST A,V_IRQEN
+    LD X,#BIG
+    LD Y,#BIG2
+    WAITV
+    CLI
+    MOVB [X],[Y],#1137
+    SEI
+    LD A,ISR_HITS
+    ST A,EG_HITS
+    JSR IRQ_RESET
+    LD A,EG_HITS                    ; one IRQ...
+    JSR T_V8
+    .BYTE 1
+    LD A,EG_MID                     ; ...taken in the middle of the copy
+    JSR T_V8
+    .BYTE 1
+    LD A,BIG2+1136                  ; the copy finished
+    JSR T_V8
+    .BYTE $5A
+    LD A,BIG2+1137                  ; and went no further
+    JSR T_V8
+    .BYTE $00
+    LD Q,EG_HD                      ; the handler's own copy worked too
+    JSR T_V32
+    .LONG $04030201
+    RTS
+
+; raster IRQ for the edge cases: notes whether a copy was under way, then copies 4 bytes
+H_EDGE:
+    MOV Q,X                         ; X is how far the interrupted copy had got
+    SUB Q,#BIG
+    CMP Q,#1137
+    BHS .LATE
+    LD A,#1
+    ST A,EG_MID
+.LATE:
+    ADDZ ISR_HITS,#1
+    LD A,V_IRQST
+    ST A,V_IRQST
+    LD X,#EG_HS
+    LD Y,#EG_HD
+    MOVB [X],[Y],#4
+    RTI
+
 ; line timing: WAITV wakes at the start of line 240; a line is 455 cycles
 SYS_TIMING:
     JSR T_SECT
@@ -795,5 +910,15 @@ R_X:        .LONG 0
 R_Y:        .LONG 0
 R_GP:       .BYTE 0
 R_DP:       .BYTE 0
+EG_VECS:    .LONG 0
+EG_SP1:     .LONG 0
+EG_SP2:     .LONG 0
+EG_SP3:     .LONG 0
+EG_BYTE:    .BYTE 0
+EG_LINE:    .BYTE 0
+EG_HITS:    .BYTE 0
+EG_MID:     .BYTE 0
+EG_HS:      .BYTE 1, 2, 3, 4
+EG_HD:      .LONG 0
 AF_HITS:    .BYTE 0
 AF_ENDX:    .BYTE 0

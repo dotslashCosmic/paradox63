@@ -568,14 +568,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
         match reg {
             0x0 => {
                 // Push A (8-bit, 1 byte)
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), self.registers.a());
                 Ok(Cycles(2))
             }
             0x1 => {
                 // Push B (8-bit, 1 byte)
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), self.registers.b());
                 Ok(Cycles(2))
@@ -583,7 +583,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x2 => {
                 // Push D (16-bit, 2 bytes)
                 let value = self.registers.d();
-                let sp = self.registers.sp() - 2;
+                let sp = self.registers.sp().wrapping_sub(2) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -591,14 +591,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
             }
             0x3 => {
                 // Push E (8-bit, 1 byte)
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), self.registers.e());
                 Ok(Cycles(2))
             }
             0x4 => {
                 // Push F (8-bit, 1 byte)
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), self.registers.f());
                 Ok(Cycles(2))
@@ -606,7 +606,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x5 => {
                 // Push W (16-bit, 2 bytes)
                 let value = self.registers.w();
-                let sp = self.registers.sp() - 2;
+                let sp = self.registers.sp().wrapping_sub(2) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -615,7 +615,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x6 => {
                 // Push Q (32-bit, 4 bytes)
                 let value = self.registers.q();
-                let sp = self.registers.sp() - 4;
+                let sp = self.registers.sp().wrapping_sub(4) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -625,7 +625,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             }
             0x7 => {
                 // Push GP (8-bit, 1 byte)
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), self.registers.gp());
                 Ok(Cycles(2))
@@ -633,7 +633,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x8 => {
                 // Push X (24-bit, 3 bytes)
                 let value = self.registers.x();
-                let sp = self.registers.sp() - 3;
+                let sp = self.registers.sp().wrapping_sub(3) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -643,7 +643,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0x9 => {
                 // Push Y (24-bit, 3 bytes)
                 let value = self.registers.y();
-                let sp = self.registers.sp() - 3;
+                let sp = self.registers.sp().wrapping_sub(3) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -653,7 +653,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0xA => {
                 // Push SP (24-bit, 3 bytes) - pushes pre-decrement value
                 let value = self.registers.sp();
-                let sp = value - 3;
+                let sp = value.wrapping_sub(3) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value as u8);
                 self.bus.write(Addr::new(sp + 1), (value >> 8) as u8);
@@ -663,7 +663,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             0xC | 0xD => {
                 // Push DP or CC (8-bit, 1 byte), as PUSH2 already allows
                 let value = self.read_register(reg)? as u8;
-                let sp = self.registers.sp() - 1;
+                let sp = self.registers.sp().wrapping_sub(1) & 0x00FF_FFFF;
                 self.registers.set_sp(sp);
                 self.bus.write(Addr::new(sp), value);
                 Ok(Cycles(2))
@@ -817,7 +817,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         let cycles = if size1 >= 3 || size2 >= 3 { 4 } else { 3 };
 
         // Decrement SP by total size
-        let sp = self.registers.sp() - total_size;
+        let sp = self.registers.sp().wrapping_sub(total_size) & 0x00FF_FFFF;
         self.registers.set_sp(sp);
 
         // Write reg1 first (at lower address)

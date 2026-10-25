@@ -159,6 +159,67 @@ fn swi_and_interrupt_opcodes_ignore_masks() {
 }
 
 #[test]
+fn rti_from_a_nested_swi_keeps_the_nmi_guard() {
+    let mut c = cpu(&[0x00, 0x00]);
+    for (i, b) in [0xF3u8, 0x00, 0x00, 0x00, 0x00, 0x00].iter().enumerate() {
+        c.bus.write(Addr::new(NMI_H + i as u32), *b); // SWI, then NOPs
+    }
+    c.set_nmi_pending(true);
+    step(&mut c); // into the NMI handler
+    step(&mut c); // SWI
+    step(&mut c); // the SWI handler's RTI
+    assert_eq!(c.registers.pc(), NMI_H + 2);
+    c.set_nmi_pending(true);
+    step(&mut c);
+    assert_eq!(c.registers.pc(), NMI_H + 4, "still inside the NMI handler: no nesting");
+}
+
+#[test]
+fn a_handlers_block_op_leaves_the_interrupted_one_alone() {
+    const SRC: u32 = 0x2000;
+    const DST: u32 = 0x3000;
+    let mut c = cpu(&[0x60, 0x08, 0x00, 0x00]); // MOVB 8 bytes
+    for i in 0..16 {
+        c.bus.write(Addr::new(SRC + i), 0x10 + i as u8);
+        c.bus.write(Addr::new(DST + i), 0xEE);
+    }
+    // the IRQ handler copies 4 bytes of its own: LDI X,$5000 / LDI Y,$6000 / MOVB 4 / RTI
+    let handler = [0x5A, 0x08, 0x00, 0x50, 0x00, 0x5A, 0x09, 0x00, 0x60, 0x00, 0x60, 0x04, 0x43, 0x00];
+    for (i, b) in handler.iter().enumerate() {
+        c.bus.write(Addr::new(IRQ_H + i as u32), *b);
+    }
+    c.registers.set_x(SRC);
+    c.registers.set_y(DST);
+    step(&mut c);
+    step(&mut c); // two bytes copied
+    c.set_irq_pending(true);
+    step(&mut c);
+    c.set_irq_pending(false);
+    for _ in 0..100 {
+        if c.registers.pc() == PC + 2 {
+            break;
+        }
+        step(&mut c);
+    }
+    assert_eq!(c.registers.pc(), PC + 2);
+    for i in 0..8 {
+        assert_eq!(c.bus.read(Addr::new(DST + i)), 0x10 + i as u8, "byte {i}");
+    }
+    assert_eq!(c.bus.read(Addr::new(DST + 8)), 0xEE, "nothing copied past the 8 bytes");
+}
+
+#[test]
+fn push_at_the_bottom_of_memory_wraps() {
+    for (code, size) in [([0x56u8, 0x02], 2u32), ([0x56, 0x06], 4), ([0x57, 0x86], 7)] {
+        let mut c = cpu(&code);
+        c.registers.set_sp(1);
+        let cycles = step(&mut c);
+        assert!(cycles < 10, "{code:02X?}: {cycles} cycles");
+        assert_eq!(c.registers.sp(), (1u32.wrapping_sub(size)) & 0x00FF_FFFF);
+    }
+}
+
+#[test]
 fn unmasked_irq_wakes_wait_into_the_handler() {
     let mut c = cpu(&[0xB0, 0x00]);
     step(&mut c);

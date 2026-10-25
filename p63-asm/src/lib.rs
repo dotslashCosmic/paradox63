@@ -160,19 +160,25 @@ struct Layout {
 fn run_passes(lines: &[Line]) -> Result<Program, Vec<AsmError>> {
     let mut hints = vec![Hint::default(); lines.len()];
     let mut symbols = HashMap::new();
+    let mut settled = false;
     for _ in 0..MAX_PASSES {
         let before: Vec<(bool, u8)> = hints.iter().map(|h| (h.long_branch, h.disp_class)).collect();
         let layout = lay_out(lines, &mut hints, &symbols, false);
         let after: Vec<(bool, u8)> = hints.iter().map(|h| (h.long_branch, h.disp_class)).collect();
-        let stable = layout.symbols == symbols && before == after;
+        settled = layout.symbols == symbols && before == after;
         symbols = layout.symbols;
-        if stable {
+        if settled {
             break;
         }
     }
     let layout = lay_out(lines, &mut hints, &symbols, true);
     if !layout.errors.is_empty() {
         return Err(layout.errors);
+    }
+    if !settled || layout.symbols != symbols {
+        // labels would point at the wrong places
+        let (file, line) = lines.first().map_or((String::new(), 0), |l| (l.file.clone(), l.number));
+        return Err(vec![AsmError { file, line, message: format!("layout didn't settle in {MAX_PASSES} passes") }]);
     }
     let symbols = layout.symbols.into_iter().map(|(k, v)| (k, (v & 0xFF_FFFF) as u32)).collect();
     Ok(Program { segments: layout.segments.into_iter().filter(|(_, b)| !b.is_empty()).collect(), symbols })

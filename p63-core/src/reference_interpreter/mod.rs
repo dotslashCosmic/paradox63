@@ -81,7 +81,14 @@ pub struct ReferenceInterpreter<B: Bus> {
 
     /// Inside an NMI handler (NMI doesn't nest)
     nmi_active: bool,
+
+    /// One entry per interrupt being handled, innermost last: its kind and the block
+    /// operation it interrupted, so a handler's own block ops can't disturb it
+    frames: Vec<(Interrupt, Option<BlockContinuation>)>,
 }
+
+/// Interrupt nesting kept track of; deeper frames (a handler that never returns) drop the oldest.
+const MAX_FRAMES: usize = 64;
 
 /// Why the CPU is halted, if it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +114,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
             block_continuation: None,
             halt: Halt::Running,
             nmi_active: false,
+            frames: Vec::new(),
         }
     }
 
@@ -123,6 +131,7 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.block_continuation = None;
         self.halt = Halt::Running;
         self.nmi_active = false;
+        self.frames.clear();
     }
 
     /// Returns why the CPU is halted, if it is.
