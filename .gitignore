@@ -2,6 +2,7 @@
 !/.gitignore
 !/LICENSE
 !/Cargo.toml
+!/Cargo.lock
 !/p63-spec/
 !/p63-core/
 !/p63-asm/
