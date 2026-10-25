@@ -419,6 +419,7 @@ fn play(file: &Path, stats: bool) -> Result<(), String> {
         (Key::Right, 0x01),
         (Key::Enter, 0x20),
         (Key::Backspace, 0x10),
+        (Key::C, 0x10),
         (Key::Z, 0x80),
         (Key::X, 0x40),
     ];
