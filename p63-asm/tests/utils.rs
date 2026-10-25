@@ -3,9 +3,9 @@
 use p63_asm::{assemble, Program};
 use p63_core::{Addr, Bus, Flags, Ram, ReferenceInterpreter};
 
-const UTILS: &str = "../p63-files/utils";
+const UTILS: &str = "../utils";
 
-/// The utils live outside the repo; their tests only run where the files exist.
+/// Skips the utils tests in a checkout without the utils folder.
 fn have_utils() -> bool {
     std::path::Path::new(UTILS).is_dir()
 }

@@ -7,5 +7,6 @@
 !/p63-asm/
 !/p63-dis/
 !/p63-sim/
+!/utils/
 
 target/
