@@ -1,5 +1,6 @@
 //! Sound output: the machine's samples go to the default output device through cpal,
 //! resampled from `p63_apu::SAMPLE_RATE` to whatever the device runs at.
+//! Frames run on their own clock, so playback speed bends very slightly to keep the queue steady.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -11,8 +12,10 @@ type Queue = Arc<Mutex<VecDeque<(i16, i16)>>>;
 
 /// About one frame: playback waits for this much before starting or after running dry.
 const PREFILL: usize = p63_apu::SAMPLE_RATE as usize / 60;
-/// About two frames: the frame loop waits while more than this is queued.
-pub const TARGET_QUEUED: usize = PREFILL * 2;
+/// About two frames: playback speeds up a little above this and slows down below it.
+const TARGET_QUEUED: usize = PREFILL * 2;
+/// Most the playback speed bends to hold the queue at TARGET_QUEUED (0.5%, far too little to hear).
+const MAX_BEND: f64 = 0.005;
 /// About eight frames; older samples are dropped past this (only if the loop stalls).
 const MAX_QUEUED: usize = PREFILL * 8;
 
@@ -61,10 +64,13 @@ where
     let (mut phase, mut prev, mut next, mut primed) = (0.0f64, (0i16, 0i16), (0i16, 0i16), false);
     let fill = move |out: &mut [T], _: &cpal::OutputCallbackInfo| {
         let Ok(mut q) = queue.lock() else { return };
+        // too much queued: play a hair fast; too little: a hair slow
+        let level = (q.len() as f64 - TARGET_QUEUED as f64) / TARGET_QUEUED as f64;
+        let bent = step * (1.0 + (level * MAX_BEND).clamp(-MAX_BEND, MAX_BEND));
         for frame in out.chunks_mut(channels) {
             primed = primed || q.len() >= PREFILL;
             if primed {
-                phase += step;
+                phase += bent;
                 while phase >= 1.0 {
                     phase -= 1.0;
                     prev = next;
