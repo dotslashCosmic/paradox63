@@ -40,6 +40,9 @@ enum Command {
     /// Arrows = D-pad, Enter = Start, Backspace = Select, Z/X = A/B, Esc = quit
     Play {
         file: PathBuf,
+        /// Print a line a second: fps and where each frame's time went
+        #[arg(long)]
+        stats: bool,
     },
     /// Boot a program (assembly source or .p63 cartridge) and run it
     Run {
@@ -77,7 +80,7 @@ enum Command {
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Asm { file, output, symbols, cart } => asm(&file, output.as_deref(), symbols, cart.as_deref()),
-        Command::Play { file } => play(&file),
+        Command::Play { file, stats } => play(&file, stats),
         Command::Run { file, frames, peek, hold, screenshot, wav } => {
             run(&file, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
         }
@@ -184,8 +187,118 @@ fn boot(file: &Path) -> Result<(p63_bus::Machine, p63_cart::Cart), String> {
     Ok((machine, info))
 }
 
-fn play(file: &Path) -> Result<(), String> {
+/// Per-second timing for `play --stats`: how evenly frames reach the window, and where the time goes.
+#[derive(Default)]
+struct Stats {
+    /// gaps between one frame reaching the window and the next, in ms
+    gaps: Vec<f64>,
+    wait: std::time::Duration,
+    emulate: std::time::Duration,
+    draw: std::time::Duration,
+    started: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl Stats {
+    fn frame(&mut self, wait: std::time::Duration, emulate: std::time::Duration, draw: std::time::Duration, queued: usize) {
+        let now = std::time::Instant::now();
+        let start = *self.started.get_or_insert(now);
+        if let Some(last) = self.last {
+            self.gaps.push((now - last).as_secs_f64() * 1000.0);
+        }
+        self.last = Some(now);
+        self.wait += wait;
+        self.emulate += emulate;
+        self.draw += draw;
+        let elapsed = (now - start).as_secs_f64();
+        if elapsed >= 1.0 && !self.gaps.is_empty() {
+            let n = self.gaps.len() as f64;
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / n;
+            let mut sorted = self.gaps.clone();
+            sorted.sort_by(f64::total_cmp);
+            let pick = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize];
+            eprintln!(
+                "{:3.0} fps | gaps p50 {:4.1} p95 {:4.1} max {:4.1} ms | early {:2} late {:2} | emulate {:4.1} draw {:4.1} wait {:4.1} ms | sound {:3.0} ms",
+                n / elapsed,
+                pick(0.5),
+                pick(0.95),
+                sorted[sorted.len() - 1],
+                self.gaps.iter().filter(|&&g| g < 12.0).count(),
+                self.gaps.iter().filter(|&&g| g > 21.0).count(),
+                ms(self.emulate),
+                ms(self.draw),
+                ms(self.wait),
+                queued as f64 * 1000.0 / f64::from(p63_apu::SAMPLE_RATE),
+            );
+            *self = Self { started: Some(now), last: Some(now), ..Self::default() };
+        }
+    }
+}
+
+/// Releases one frame every console frame period, on a fixed schedule.
+struct FrameClock {
+    period: std::time::Duration,
+    next: std::time::Instant,
+}
+
+impl FrameClock {
+    fn new() -> Self {
+        let cycles = f64::from(p63_spec::DOTS_PER_LINE * p63_spec::LINES_PER_FRAME);
+        let period = std::time::Duration::from_secs_f64(cycles / f64::from(p63_spec::CLOCK_HZ));
+        Self { period, next: std::time::Instant::now() }
+    }
+
+    /// Waits for the next frame's slot: sleeps most of the way, then spins the last stretch exactly.
+    fn wait(&mut self) {
+        let now = std::time::Instant::now();
+        if now > self.next + self.period * 4 {
+            self.next = now; // fell far behind (window dragged, debugger...): start the schedule again
+        }
+        while let Some(left) = self.next.checked_duration_since(std::time::Instant::now()) {
+            if left > std::time::Duration::from_millis(2) {
+                std::thread::sleep(left - std::time::Duration::from_millis(2));
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        self.next += self.period;
+    }
+}
+
+/// Asks Windows for 1 ms timer precision while playing, so the sleeps above land on time.
+struct FineTimer;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(ms: u32) -> u32;
+    fn timeEndPeriod(ms: u32) -> u32;
+}
+
+impl FineTimer {
+    fn new() -> Self {
+        #[cfg(windows)]
+        // SAFETY: plain winmm calls with no pointers; paired with timeEndPeriod in drop
+        unsafe {
+            timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+impl Drop for FineTimer {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        // SAFETY: undoes the timeBeginPeriod(1) from new
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
+fn play(file: &Path, stats: bool) -> Result<(), String> {
     use minifb::{Key, Scale, Window, WindowOptions};
+    use std::time::Instant;
     let keys = [
         (Key::Up, 0x08),
         (Key::Down, 0x04),
@@ -201,20 +314,26 @@ fn play(file: &Path) -> Result<(), String> {
     let options = WindowOptions { scale: Scale::X2, resize: true, ..WindowOptions::default() };
     let mut window = Window::new(&format!("Paradox63 - {}", info.title), w, h, options).map_err(|e| e.to_string())?;
     let speaker = audio::Speaker::open().map_err(|e| eprintln!("no sound: {e}")).ok();
-    // with sound, the audio device's clock paces the frames; without it, a 60 fps timer does
-    window.set_target_fps(if speaker.is_some() { 0 } else { 60 });
+    // frames run on their own steady clock; the sound follows it (see audio.rs)
+    window.set_target_fps(0);
+    let _timer = FineTimer::new();
+    let mut clock = FrameClock::new();
+    let mut timing = Stats::default();
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        if let Some(speaker) = &speaker {
-            while speaker.queued() > audio::TARGET_QUEUED {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
+        let t0 = Instant::now();
+        clock.wait();
+        let t1 = Instant::now();
         machine.cpu.bus.keyboard.pad[0] = keys.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
         machine.run_frame().map_err(|e| format!("frame {}, at ${:06X}: {e}", machine.frames, machine.cpu.registers.pc()))?;
         if let Some(speaker) = &speaker {
             speaker.push(&machine.audio);
         }
+        let t2 = Instant::now();
         window.update_with_buffer(&machine.frame, w, h).map_err(|e| e.to_string())?;
+        if stats {
+            let queued = speaker.as_ref().map_or(0, audio::Speaker::queued);
+            timing.frame(t1 - t0, t2 - t1, t2.elapsed(), queued);
+        }
     }
     Ok(())
 }
