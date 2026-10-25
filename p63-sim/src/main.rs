@@ -4,7 +4,9 @@
 //! `call` assembles a file, calls one routine with the given registers and
 //!        prints the registers it returns with.
 //! `run`  boots a program or cartridge on the full machine for N frames.
-//! `play` boots it in a window with the keyboard as the gamepad.
+//! `play` boots it in a window with the keyboard as the gamepad, with sound.
+
+mod audio;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -54,6 +56,9 @@ enum Command {
         /// Save the last frame as a .bmp
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Save the sound of the whole run as a .wav
+        #[arg(long)]
+        wav: Option<PathBuf>,
     },
     /// Call routines: `call utils/bitops.p63 POP_COUNT A=$A5`.
     /// Several in a row share state: `call utils/prng.p63 RAND_SEED8,RAND8 A=$42`
@@ -73,7 +78,9 @@ fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Asm { file, output, symbols, cart } => asm(&file, output.as_deref(), symbols, cart.as_deref()),
         Command::Play { file } => play(&file),
-        Command::Run { file, frames, peek, hold, screenshot } => run(&file, frames, &peek, &hold, screenshot.as_deref()),
+        Command::Run { file, frames, peek, hold, screenshot, wav } => {
+            run(&file, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
+        }
         Command::Call { file, routine, regs, max_steps } => call(&file, &routine, &regs, max_steps),
     };
     match result {
@@ -193,28 +200,53 @@ fn play(file: &Path) -> Result<(), String> {
     let (w, h) = (p63_ppu::WIDTH, p63_ppu::HEIGHT);
     let options = WindowOptions { scale: Scale::X2, resize: true, ..WindowOptions::default() };
     let mut window = Window::new(&format!("Paradox63 - {}", info.title), w, h, options).map_err(|e| e.to_string())?;
-    window.set_target_fps(60);
+    let speaker = audio::Speaker::open().map_err(|e| eprintln!("no sound: {e}")).ok();
+    // with sound, the audio device's clock paces the frames; without it, a 60 fps timer does
+    window.set_target_fps(if speaker.is_some() { 0 } else { 60 });
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        if let Some(speaker) = &speaker {
+            while speaker.queued() > audio::TARGET_QUEUED {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
         machine.cpu.bus.keyboard.pad[0] = keys.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
         machine.run_frame().map_err(|e| format!("frame {}, at ${:06X}: {e}", machine.frames, machine.cpu.registers.pc()))?;
+        if let Some(speaker) = &speaker {
+            speaker.push(&machine.audio);
+        }
         window.update_with_buffer(&machine.frame, w, h).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-fn run(file: &Path, frames: u64, peek: &[String], hold: &[String], screenshot: Option<&Path>) -> Result<(), String> {
+fn run(
+    file: &Path,
+    frames: u64,
+    peek: &[String],
+    hold: &[String],
+    screenshot: Option<&Path>,
+    wav: Option<&Path>,
+) -> Result<(), String> {
     let (mut machine, info) = boot(file)?;
     println!("booted {:?} ({} byte image)", info.title, info.image().len());
     for name in hold {
         machine.cpu.bus.keyboard.pad[0] |= button(name)?;
     }
+    let mut sound = Vec::new();
     for frame in 0..frames {
         if let Err(e) = machine.run_frame() {
             print_registers(&machine.cpu, 0);
             return Err(format!("frame {frame}, at ${:06X}: {e}", machine.cpu.registers.pc()));
         }
+        if wav.is_some() {
+            sound.extend_from_slice(&machine.audio);
+        }
     }
     println!("ran {frames} frames");
+    if let Some(path) = wav {
+        audio::save_wav(path, &sound)?;
+        println!("saved {} ({} samples at {} Hz)", path.display(), sound.len(), p63_apu::SAMPLE_RATE);
+    }
     let r = &machine.cpu.registers;
     println!("PC=${:06X} SP=${:06X} halt={:?}", r.pc(), r.sp(), machine.cpu.halt());
     if let Some(path) = screenshot {

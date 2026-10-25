@@ -8,11 +8,12 @@ members = [
     "p63-cart",
     "p63-bus",
     "p63-ppu",
+    "p63-apu",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 authors = ["Paradox63 Team"]
 edition = "2021"
 

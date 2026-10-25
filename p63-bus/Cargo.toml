@@ -9,3 +9,7 @@ p63-core = { path = "../p63-core" }
 p63-spec = { path = "../p63-spec" }
 p63-cart = { path = "../p63-cart" }
 p63-ppu = { path = "../p63-ppu" }
+p63-apu = { path = "../p63-apu" }
+
+[dev-dependencies]
+p63-asm = { path = "../p63-asm" }

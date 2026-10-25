@@ -1,0 +1,790 @@
+; Paradox63 Assembly Sound Subroutines
+; Square-wave notes on any of the 8 voices (SND_INIT, SND_NOTE, SND_OFF)
+; Needs: INCLUDE "p63_hw.inc" before this file
+; Registers: A(8 high):B(8 low)=D(16) E(8 high):F(8 low)=W(16) D(16):W(16)=Q(32) GP(8)
+; Audio RAM used: square wave at $0000-$003F, sample directory at $2000 (sample 0 = the wave)
+
+SND_DIR     EQU $20                 ; directory page: DIR << 8 = $2000 in Audio RAM
+SND_WAVE    EQU 64                  ; samples in one cycle of the wave
+
+; Pitches for the 64-sample wave (4.12 fixed point): pitch = freq x 64 x 4096 / 31960
+
+N_C4     EQU $0862               ; 261.6 Hz
+N_CS4    EQU $08E2
+N_D4     EQU $0969
+N_DS4    EQU $09F8
+N_E4     EQU $0A90
+N_F4     EQU $0B30
+N_FS4    EQU $0BDB
+N_G4     EQU $0C8F
+N_GS4    EQU $0D4F
+N_A4     EQU $0E19
+N_AS4    EQU $0EF1
+N_B4     EQU $0FD3
+
+N_C5     EQU $10C4               ; 523.3 Hz
+N_CS5    EQU $11C4
+N_D5     EQU $12D2
+N_DS5    EQU $13F0
+N_E5     EQU $1520
+N_F5     EQU $1660
+N_FS5    EQU $17B6
+N_G5     EQU $191E
+N_GS5    EQU $1A9E
+N_A5     EQU $1C32
+N_AS5    EQU $1DDF
+N_B5     EQU $1FA6
+N_C6     EQU $2188
+; Build the square wave and directory, then turn the engine on at full master volume
+; Input:  none
+; Output: none
+; Trashes: A, D, X
+; Example use:
+;   JSR SND_INIT            ; once at startup
+SND_INIT:
+    LD X,#ARAM_BASE                 ; first half of the cycle: +64
+    FILL X,#$4040,#16
+    LD X,#ARAM_BASE+32              ; second half: -64
+    FILL X,#$C0C0,#16
+    CLR D
+    ST D,ARAM_BASE+SND_DIR*256      ; sample 0: START = 0
+    ST D,ARAM_BASE+SND_DIR*256+2    ; LOOP = 0
+    LD D,#SND_WAVE
+    ST D,ARAM_BASE+SND_DIR*256+4    ; END = 64
+    LD A,#SND_DIR
+    ST A,AUD_DIR
+    LD A,#$FF
+    ST A,AUD_MVOL_L                 ; master volume
+    ST A,AUD_MVOL_R
+    LD A,#$01
+    ST A,AUD_ACTRL                  ; engine on, nearest sampling
+    RTS
+
+; Start a note: instant attack, decay to sustain 12, release 4 after SND_OFF
+; Input:  B = voice (0-7), W = pitch (N_xx or any 4.12 value)
+; Output: none
+; Trashes: A, B, D, GP, X
+; Example use:
+;   CLR B                   ; voice 0
+;   LD W,#N_A4
+;   JSR SND_NOTE            ; A4 until SND_OFF
+SND_NOTE:
+    CLR A                           ; D = A:B = voice
+    ASL D,#3                        ; D = voice x 8
+    LD X,#AUD_BASE
+    SMODX X,D                       ; X = this voice's registers
+    LSR D,#3                        ; B = voice again
+    ST W,AV_PITCH_L,X               ; pitch, low byte first
+    LD A,#$A0
+    ST A,AV_VOL_L,X                 ; centred, a bit under full volume
+    ST A,AV_VOL_R,X
+    CLR A
+    ST A,AV_SRC,X                   ; sample 0 = the square wave
+    LD A,#$F6
+    ST A,AV_ADSR1,X                 ; attack 15 (instant), decay 6
+    LD A,#$C4
+    ST A,AV_ADSR2,X                 ; sustain 12, release 4
+    LD A,#$01
+    ST A,AV_CTRL,X                  ; loop the wave
+    BSR _SND_MASK
+    ST A,AUD_KON                    ; key on
+    RTS
+
+; Release a note; it fades out over about 0.4 s
+; Input:  B = voice (0-7)
+; Output: none
+; Trashes: A, GP
+; Example use:
+;   CLR B
+;   JSR SND_OFF             ; voice 0 fades out
+SND_OFF:
+    BSR _SND_MASK
+    ST A,AUD_KOFF                   ; key off
+    RTS
+
+; A = 1 << B, trashes GP
+_SND_MASK:
+    LD A,#1
+    TST B
+    BEQ .DONE                       ; voice 0: bit 0
+    MOV GP,B
+.SHIFT:
+    LSL A,#1
+    DBNZ GP,.SHIFT
+.DONE:
+    RTS
+
+; Song player: each track drives one voice from a list of events, one step per frame
+; Song layout:
+;   .BYTE tracks
+;   then per track, 24 bytes:
+;     +0  .ADDR events      first event
+;     +3  .ADDR loop        where to go when the list ends
+;     +6  .BYTE voice       0-7
+;     +7  .BYTE sample      sample number (ignored for noise)
+;     +8  .BYTE ctrl        voice CTRL: 1 = loop the sample, 2 = noise
+;     +9  15 bytes of 0     player state (frames left, event pointer, voice registers, staging)
+; Event: .BYTE frames (1-255, 0 = end of list), volume, pitch low, pitch high
+;   for a noise track the pitch low byte is the NOISE rate
+SNG_COUNT   EQU 9                   ; frames left on the current event
+SNG_PTR     EQU 10                  ; next event (4 bytes)
+SNG_VREGS   EQU 14                  ; this voice's registers (4 bytes)
+SNG_VOL     EQU 18
+SNG_PITCH   EQU 19
+SNG_ENTRY   EQU 24                  ; bytes per track
+
+; Start a song: set up each track's voice and key them all on
+; Input:  X = song
+; Output: none
+; Trashes: A, B, D, W, Q, GP, X, Y
+; Example use:
+;   LD X,#MY_SONG
+;   JSR SONG_START          ; then JSR SONG_TICK once per frame
+SONG_START:
+    MOV Q,X
+    ST Q,SNG_CUR                    ; remember the song for SONG_TICK
+    LD A,0,X
+    MOV GP,A                        ; GP = tracks
+    LEA X,1,X
+    CLR A
+    ST A,SNG_KON
+.TRACK:
+    LD Q,0,X
+    ST Q,SNG_PTR,X                  ; start at the first event
+    LD A,#1
+    ST A,SNG_COUNT,X                ; first SONG_TICK reads it
+    CLR A
+    LD B,6,X                        ; D = voice
+    ASL D,#3                        ; D = voice x 8
+    LD Y,#AUD_BASE
+    ADD Y,D                         ; Y = this voice's registers
+    MOV Q,Y
+    ST Q,SNG_VREGS,X
+    LD A,7,X
+    ST A,AV_SRC,Y
+    LD A,8,X
+    ST A,AV_CTRL,Y
+    LD A,#$F0
+    ST A,AV_ADSR1,Y                 ; instant attack, full sustain: the events set the volume
+    ST A,AV_ADSR2,Y
+    CLR A
+    ST A,AV_VOL_L,Y
+    ST A,AV_VOL_R,Y
+    LD B,6,X
+    PUSH GP
+    BSR _SND_MASK                   ; A = this voice's key-on bit
+    POP GP
+    OR A,SNG_KON
+    ST A,SNG_KON
+    LEA X,SNG_ENTRY,X
+    DBNZ GP,.TRACK
+    LD A,SNG_KON
+    ST A,AUD_KON                    ; all voices start together
+    RTS
+
+; Advance the song by one frame
+; Input:  none (the song from SONG_START)
+; Output: none
+; Trashes: A, B, D, W, Q, GP, X, Y
+; Example use:
+;   .LOOP: WAITV
+;          JSR SONG_TICK
+;          BRA .LOOP
+SONG_TICK:
+    LD X,SNG_CUR
+    LD A,0,X
+    MOV GP,A                        ; GP = tracks
+    LEA X,1,X
+.TRACK:
+    LD A,SNG_COUNT,X
+    DEC A
+    ST A,SNG_COUNT,X
+    BNE .NEXT                       ; current event still running
+    LD Q,SNG_PTR,X
+    MOV Y,Q                         ; Y = next event
+.READ:
+    LD A,0,Y
+    TST A
+    BNE .EVENT
+    LD Q,3,X                        ; end of the list: go to the loop point
+    MOV Y,Q
+    BRA .READ
+.EVENT:
+    ST A,SNG_COUNT,X
+    LD A,1,Y
+    ST A,SNG_VOL,X                  ; stage volume and pitch: Y is needed for the voice next
+    LD D,2,Y
+    ST D,SNG_PITCH,X
+    LEA Y,4,Y
+    MOV Q,Y
+    ST Q,SNG_PTR,X
+    LD Q,SNG_VREGS,X
+    MOV Y,Q                         ; Y = this voice's registers
+    LD A,SNG_VOL,X
+    ST A,AV_VOL_L,Y
+    ST A,AV_VOL_R,Y
+    LD A,8,X
+    BIT A,#$02                      ; noise track?
+    BNE .NOISE
+    LD D,SNG_PITCH,X
+    ST D,AV_PITCH_L,Y
+    BRA .NEXT
+.NOISE:
+    LD A,SNG_PITCH,X
+    ST A,AUD_NOISE
+.NEXT:
+    LEA X,SNG_ENTRY,X
+    DBNZ GP,.TRACK
+    RTS
+
+SNG_CUR:    .BYTE 0, 0, 0, 0        ; song being played
+SNG_KON:    .BYTE 0                 ; key-on bits being collected by SONG_START
+
+; Music player: songs written as notes, patterns and instruments (MUS_START, MUS_TICK)
+; Song layout:
+;   .BYTE tempo                 frames per tick (6 = sixteenth notes at 150 BPM)
+;   .BYTE tracks
+;   .ADDR instruments           instrument 1 (instruments are numbered from 1)
+;   then per track:
+;     .BYTE voice, flags, vol shift, delay
+;           flags: 1 = drum track (each note byte picks an instrument and plays its own note)
+;           vol shift: volumes >> this (an echo track uses 2)
+;           delay: frames to wait before starting (an echo track replays another's order late)
+;     .ADDR order               order list
+;     .DS TR_STATE              player state
+; Order list: .ADDR pattern, ..., then .ADDR 0 and .ADDR where to loop back to
+; Pattern bytes:
+;   note, ticks                 play a note (M_xx, or an instrument number in a drum track)
+;   MUS_REST, ticks             silence
+;   MUS_INS, n                  switch to instrument n
+;   MUS_END                     end of pattern, on to the next in the order list
+; Instrument, 12 bytes:
+;   +0 sample  +1 ctrl (1 loop, 2 noise)  +2 volume left  +3 volume right  +4 ADSR1  +5 ADSR2
+;   +6 gap: key off this many frames before the note ends (0 = let the next note cut it)
+;   +7 effects: 1 = vibrato, 2 = pitch drop, 4 = bend up into the note
+;   +8 pitch drop: pitch loses pitch >> this every frame
+;   +9 vibrato delay in frames  +10 vibrato depth: pitch >> this
+;   +11 note for drum hits, or the NOISE rate for a noise instrument
+MUS_END     EQU $00
+MUS_REST    EQU $80
+MUS_INS     EQU $81
+
+TR_VOICE    EQU 0                   ; track definition
+TR_FLAGS    EQU 1
+TR_VSHIFT   EQU 2
+TR_DELAY    EQU 3
+TR_ORDER    EQU 4
+TR_ORD      EQU 8                   ; state: next order entry (4 bytes)
+TR_PAT      EQU 12                  ; next pattern byte (4 bytes)
+TR_WAIT     EQU 16                  ; frames until the next event
+TR_GATE     EQU 18                  ; frames until key off, 0 = none
+TR_INS      EQU 20                  ; current instrument (4 bytes)
+TR_BASE     EQU 24                  ; the note's pitch
+TR_CUR      EQU 26                  ; pitch after drop and bend
+TR_FX       EQU 28                  ; frames since the note started
+TR_ON       EQU 29                  ; 1 while keyed on
+TR_VREGS    EQU 30                  ; this voice's registers (4 bytes)
+TR_TMP      EQU 34                  ; scratch (4 bytes)
+TR_OUT      EQU 38                  ; pitch written to the voice
+TR_D        EQU 40                  ; scratch: effect depth
+TR_H        EQU 42                  ; scratch: half depth
+TR_FLG      EQU 44                  ; scratch: effect flags
+TR_SIZE     EQU 48                  ; bytes per track
+TR_STATE    EQU TR_SIZE-TR_ORDER-3  ; state bytes after the 7-byte definition
+
+INS_SIZE    EQU 12
+
+; Start a song
+; Input:  X = song
+; Output: none
+; Trashes: A, B, D, W, Q, GP, X, Y
+; Example use:
+;   LD X,#MY_SONG
+;   JSR MUS_START           ; then JSR MUS_TICK once per frame
+MUS_START:
+    MOV Q,X
+    ST Q,MUS_SONG
+    LD A,0,X
+    ST A,MUS_TEMPO                  ; low byte; the high byte stays 0
+    LD Q,2,X
+    ST Q,MUS_INSTR
+    LD A,1,X
+    MOV GP,A                        ; GP = tracks
+    LEA X,5,X
+.TRACK:
+    LD Q,TR_ORDER,X
+    ST Q,TR_ORD,X                   ; start of the order list
+    LD Y,#MUS_ZERO
+    MOV Q,Y
+    ST Q,TR_PAT,X                   ; an empty pattern, so the first read starts the order list
+    CLR A
+    LD B,TR_DELAY,X
+    ADD D,#1
+    ST D,TR_WAIT,X                  ; first event after the delay
+    CLR D
+    ST D,TR_GATE,X
+    CLR A
+    ST A,TR_ON,X
+    LD B,TR_VOICE,X                 ; D = voice
+    ASL D,#3
+    LD Y,#AUD_BASE
+    ADD Y,D
+    MOV Q,Y
+    ST Q,TR_VREGS,X                 ; this voice's registers
+    CLR A
+    ST A,AV_VOL_L,Y
+    ST A,AV_VOL_R,Y
+    LEA X,TR_SIZE,X
+    DBNZ GP,.TRACK
+    RTS
+
+; Advance the song by one frame
+; Input:  none (the song from MUS_START)
+; Output: none
+; Trashes: A, B, D, W, Q, GP, X, Y
+; Example use:
+;   .LOOP: WAITV
+;          JSR MUS_TICK
+;          BRA .LOOP
+MUS_TICK:
+    LD X,MUS_SONG
+    LD A,1,X
+    MOV GP,A
+    LEA X,5,X
+.TRACK:
+    PUSH GP
+    BSR _MUS_TRACK
+    POP GP
+    LEA X,TR_SIZE,X
+    DBNZ GP,.TRACK
+    RTS
+
+; One track's frame; X = track
+_MUS_TRACK:
+    LD D,TR_GATE,X
+    TST D
+    BEQ .TIME
+    SUB D,#1
+    ST D,TR_GATE,X
+    BNE .TIME
+    BSR _MUS_KOFF                   ; the gap before the note ends
+.TIME:
+    LD D,TR_WAIT,X
+    SUB D,#1
+    ST D,TR_WAIT,X
+    BEQ .EVENT
+    BRA _MUS_FX                     ; same note: just the effects
+.EVENT:
+    LD Q,TR_PAT,X
+    MOV Y,Q
+.READ:
+    LD A,0,Y
+    LEA Y,1,Y
+    TST A
+    BEQ .NEXTPAT
+    CMP A,#MUS_INS
+    BEQ .INSTR
+    CMP A,#MUS_REST
+    BEQ .REST
+    BRA _MUS_NOTE
+.INSTR:
+    LD A,0,Y
+    ST A,TR_TMP+2,X                 ; save it: Q (D:W) is about to be overwritten
+    LEA Y,1,Y
+    MOV Q,Y
+    ST Q,TR_PAT,X
+    LD A,TR_TMP+2,X
+    BSR _MUS_SETINS
+    LD Q,TR_PAT,X
+    MOV Y,Q
+    BRA .READ
+.REST:
+    LD A,0,Y
+    ST A,TR_TMP+2,X
+    LEA Y,1,Y
+    MOV Q,Y
+    ST Q,TR_PAT,X
+    LD A,TR_TMP+2,X
+    BSR _MUS_LEN
+    CLR D
+    ST D,TR_GATE,X
+    BRA _MUS_KOFF
+.NEXTPAT:
+    LD Q,TR_ORD,X
+    MOV Y,Q                         ; Y = order entry
+    LD Q,0,Y
+    ST Q,TR_TMP,X
+    LEA Y,3,Y
+    MOV Q,Y
+    ST Q,TR_ORD,X
+    LD Q,TR_TMP,X
+    MOV Y,Q                         ; Y = the pattern
+    CMP Y,#0
+    BNE .READ
+    LD Q,TR_ORD,X                   ; end of the order list: the loop target follows
+    MOV Y,Q
+    LD Q,0,Y
+    ST Q,TR_ORD,X
+    BRA .NEXTPAT
+
+; Start a note: A = note byte, Y = its length byte; X = track
+_MUS_NOTE:
+    ST A,TR_TMP+2,X                 ; note (TR_TMP and +1 are scratch for the calls below)
+    LD A,0,Y
+    ST A,TR_TMP+3,X                 ; ticks
+    LEA Y,1,Y
+    MOV Q,Y
+    ST Q,TR_PAT,X
+    LD A,TR_FLAGS,X
+    BIT A,#$01
+    BEQ .TONE
+    LD A,TR_TMP+2,X                 ; drum track: the note byte is the instrument
+    BSR _MUS_SETINS
+    LD Q,TR_INS,X
+    MOV Y,Q
+    LD A,11,Y
+    ST A,TR_TMP+2,X                 ; and the instrument has the note
+.TONE:
+    CLR A
+    LD B,TR_TMP+2,X
+    ASL D,#1
+    LD Y,#MUS_PITCH
+    ADD Y,D
+    LD D,0,Y
+    ST D,TR_BASE,X
+    ST D,TR_CUR,X
+    LD A,TR_TMP+3,X
+    BSR _MUS_LEN
+    LD Q,TR_INS,X
+    MOV Y,Q                         ; Y = instrument
+    CLR D
+    ST D,TR_GATE,X
+    LD A,6,Y
+    TST A
+    BEQ .GATED
+    MOV B,A
+    CLR A
+    ST D,TR_TMP,X                   ; D = gap
+    LD D,TR_WAIT,X
+    SUB D,TR_TMP,X
+    BLS .GATED                      ; note no longer than the gap: no early key off
+    ST D,TR_GATE,X
+.GATED:
+    LD A,7,Y
+    BIT A,#$04
+    BEQ .NOBEND
+    LD D,TR_BASE,X                  ; bend: start about a whole step low
+    LSR D,#3
+    ST D,TR_TMP,X
+    LD D,TR_BASE,X
+    SUB D,TR_TMP,X
+    ST D,TR_CUR,X
+.NOBEND:
+    LD D,TR_CUR,X
+    ST D,TR_OUT,X
+    CLR A
+    ST A,TR_FX,X
+    LD A,TR_VSHIFT,X
+    ST A,MUS_VSH
+    PUSH X
+    LD Q,TR_VREGS,X
+    MOV X,Q                         ; X = voice registers, Y = instrument
+    LD A,0,Y
+    ST A,AV_SRC,X
+    LD A,1,Y
+    ST A,AV_CTRL,X
+    BIT A,#$02
+    BEQ .TONAL
+    LD A,11,Y
+    ST A,AUD_NOISE
+.TONAL:
+    LD A,4,Y
+    ST A,AV_ADSR1,X
+    LD A,5,Y
+    ST A,AV_ADSR2,X
+    LD E,MUS_VSH
+    LD A,2,Y
+    BSR _MUS_SHR8
+    ST A,AV_VOL_L,X
+    LD A,3,Y
+    BSR _MUS_SHR8
+    ST A,AV_VOL_R,X
+    POP X
+    BSR _MUS_PITCH
+    LD A,#1
+    ST A,TR_ON,X
+    LD B,TR_VOICE,X
+    BSR _SND_MASK
+    ST A,AUD_KON
+    RTS
+
+; Per-frame effects on the sounding note; X = track
+_MUS_FX:
+    LD A,TR_ON,X
+    TST A
+    BEQ .DONE
+    LD A,TR_FX,X
+    CMP A,#255
+    BEQ .COUNTED
+    INC A
+    ST A,TR_FX,X
+.COUNTED:
+    LD Q,TR_INS,X
+    MOV Y,Q                         ; Y = instrument
+    LD A,7,Y
+    ST A,TR_FLG,X
+    BIT A,#$02
+    BEQ .NODROP
+    LD A,8,Y                        ; drop: pitch -= pitch >> n
+    MOV E,A
+    LD D,TR_CUR,X
+    BSR _MUS_SHR16
+    ST D,TR_D,X
+    LD D,TR_CUR,X
+    SUB D,TR_D,X
+    ST D,TR_CUR,X
+.NODROP:
+    LD A,TR_FLG,X
+    BIT A,#$04
+    BEQ .NOBEND
+    LD D,TR_CUR,X                   ; bend: climb back to the note
+    CMP D,TR_BASE,X
+    BHS .NOBEND
+    LD D,TR_BASE,X
+    LSR D,#6
+    ST D,TR_D,X
+    LD D,TR_CUR,X
+    ADD D,TR_D,X
+    CMP D,TR_BASE,X
+    BLS .BENT
+    LD D,TR_BASE,X
+.BENT:
+    ST D,TR_CUR,X
+.NOBEND:
+    LD D,TR_CUR,X
+    ST D,TR_OUT,X
+    LD A,TR_FLG,X
+    BIT A,#$01
+    BEQ .WRITE
+    LD A,9,Y                        ; vibrato after its delay
+    ST A,TR_TMP,X
+    LD A,TR_FX,X
+    SUB A,TR_TMP,X
+    BLO .WRITE
+    AND A,#7
+    ST A,TR_TMP,X                   ; phase 0-7
+    LD A,10,Y
+    MOV E,A
+    LD D,TR_BASE,X
+    BSR _MUS_SHR16
+    ST D,TR_D,X                     ; depth
+    LSR D,#1
+    ST D,TR_H,X                     ; half depth
+    CLR A
+    LD B,TR_TMP,X
+    LD Y,#MUS_VIB
+    ADD Y,D
+    LD A,0,Y
+    MOV E,A                         ; 0, 1 = +half, 2 = +depth, 3 = -half, 4 = -depth
+    LD D,TR_OUT,X
+    CMP E,#1
+    BNE .V2
+    ADD D,TR_H,X
+.V2:
+    CMP E,#2
+    BNE .V3
+    ADD D,TR_D,X
+.V3:
+    CMP E,#3
+    BNE .V4
+    SUB D,TR_H,X
+.V4:
+    CMP E,#4
+    BNE .VSET
+    SUB D,TR_D,X
+.VSET:
+    ST D,TR_OUT,X
+.WRITE:
+    BRA _MUS_PITCH
+.DONE:
+    RTS
+
+; Write TR_OUT to the voice's pitch; X = track
+_MUS_PITCH:
+    LD Q,TR_VREGS,X
+    MOV Y,Q
+    LD D,TR_OUT,X
+    ST D,AV_PITCH_L,Y
+    RTS
+
+; Key off the track's voice if it's sounding; X = track
+_MUS_KOFF:
+    LD A,TR_ON,X
+    TST A
+    BEQ .DONE
+    LD B,TR_VOICE,X
+    BSR _SND_MASK
+    ST A,AUD_KOFF
+    CLR A
+    ST A,TR_ON,X
+.DONE:
+    RTS
+
+; Instrument A (from 1) becomes the track's; X = track
+_MUS_SETINS:
+    SUB A,#1
+    MOV B,A
+    CLR A                           ; D = n - 1
+    ASL D,#2
+    ST D,TR_TMP,X                   ; x4
+    ASL D,#1
+    ADD D,TR_TMP,X                  ; x8 + x4 = x12
+    LD Y,MUS_INSTR
+    ADD Y,D
+    MOV Q,Y
+    ST Q,TR_INS,X
+    RTS
+
+; TR_WAIT = A ticks x tempo; X = track
+_MUS_LEN:
+    MOV GP,A
+    CLR D
+.ADD:
+    ADD D,MUS_TEMPO
+    DBNZ GP,.ADD
+    ST D,TR_WAIT,X
+    RTS
+
+; A >>= E
+_MUS_SHR8:
+    TST E
+    BEQ .DONE
+    MOV GP,E
+.SHIFT:
+    LSR A,#1
+    DBNZ GP,.SHIFT
+.DONE:
+    RTS
+
+; D >>= E
+_MUS_SHR16:
+    TST E
+    BEQ .DONE
+    MOV GP,E
+.SHIFT:
+    LSR D,#1
+    DBNZ GP,.SHIFT
+.DONE:
+    RTS
+
+MUS_SONG:   .BYTE 0, 0, 0, 0        ; song being played
+MUS_INSTR:  .BYTE 0, 0, 0, 0        ; its instrument table
+MUS_TEMPO:  .BYTE 0, 0              ; frames per tick, read as a word
+MUS_VSH:    .BYTE 0                 ; volume shift being applied
+MUS_ZERO:   .BYTE MUS_END           ; an empty pattern
+MUS_VIB:    .BYTE 0, 1, 2, 1, 0, 3, 4, 3   ; vibrato shape over 8 frames
+
+; Note numbers for patterns (MIDI numbering: M_A4 = 69 = 440 Hz)
+M_C1    EQU 24
+M_CS1    EQU 25
+M_D1    EQU 26
+M_DS1    EQU 27
+M_E1    EQU 28
+M_F1    EQU 29
+M_FS1    EQU 30
+M_G1    EQU 31
+M_GS1    EQU 32
+M_A1    EQU 33
+M_AS1    EQU 34
+M_B1    EQU 35
+M_C2    EQU 36
+M_CS2    EQU 37
+M_D2    EQU 38
+M_DS2    EQU 39
+M_E2    EQU 40
+M_F2    EQU 41
+M_FS2    EQU 42
+M_G2    EQU 43
+M_GS2    EQU 44
+M_A2    EQU 45
+M_AS2    EQU 46
+M_B2    EQU 47
+M_C3    EQU 48
+M_CS3    EQU 49
+M_D3    EQU 50
+M_DS3    EQU 51
+M_E3    EQU 52
+M_F3    EQU 53
+M_FS3    EQU 54
+M_G3    EQU 55
+M_GS3    EQU 56
+M_A3    EQU 57
+M_AS3    EQU 58
+M_B3    EQU 59
+M_C4    EQU 60
+M_CS4    EQU 61
+M_D4    EQU 62
+M_DS4    EQU 63
+M_E4    EQU 64
+M_F4    EQU 65
+M_FS4    EQU 66
+M_G4    EQU 67
+M_GS4    EQU 68
+M_A4    EQU 69
+M_AS4    EQU 70
+M_B4    EQU 71
+M_C5    EQU 72
+M_CS5    EQU 73
+M_D5    EQU 74
+M_DS5    EQU 75
+M_E5    EQU 76
+M_F5    EQU 77
+M_FS5    EQU 78
+M_G5    EQU 79
+M_GS5    EQU 80
+M_A5    EQU 81
+M_AS5    EQU 82
+M_B5    EQU 83
+M_C6    EQU 84
+M_CS6    EQU 85
+M_D6    EQU 86
+M_DS6    EQU 87
+M_E6    EQU 88
+M_F6    EQU 89
+M_FS6    EQU 90
+M_G6    EQU 91
+M_GS6    EQU 92
+M_A6    EQU 93
+M_AS6    EQU 94
+M_B6    EQU 95
+M_C7    EQU 96
+M_CS7    EQU 97
+M_D7    EQU 98
+M_DS7    EQU 99
+M_E7    EQU 100
+M_F7    EQU 101
+M_FS7    EQU 102
+M_G7    EQU 103
+M_GS7    EQU 104
+M_A7    EQU 105
+M_AS7    EQU 106
+M_B7    EQU 107
+
+; Pitch of every note number for a 64-sample wave: freq x 64 x 4096 / 31960 (top notes clamp)
+MUS_PITCH:
+    .WORD $0043, $0047, $004B, $0050, $0054, $005A, $005F, $0064
+    .WORD $006A, $0071, $0077, $007F, $0086, $008E, $0097, $009F
+    .WORD $00A9, $00B3, $00BE, $00C9, $00D5, $00E2, $00EF, $00FD
+    .WORD $010C, $011C, $012D, $013F, $0152, $0166, $017B, $0192
+    .WORD $01AA, $01C3, $01DE, $01FA, $0218, $0238, $025A, $027E
+    .WORD $02A4, $02CC, $02F7, $0324, $0354, $0386, $03BC, $03F5
+    .WORD $0431, $0471, $04B4, $04FC, $0548, $0598, $05ED, $0648
+    .WORD $06A7, $070C, $0778, $07E9, $0862, $08E2, $0969, $09F8
+    .WORD $0A90, $0B30, $0BDB, $0C8F, $0D4E, $0E19, $0EF0, $0FD3
+    .WORD $10C4, $11C3, $12D1, $13F0, $151F, $1661, $17B6, $191E
+    .WORD $1A9D, $1C32, $1DDF, $1FA6, $2188, $2386, $25A3, $27E0
+    .WORD $2A3F, $2CC2, $2F6B, $323D, $353A, $3864, $3BBE, $3F4C
+    .WORD $430F, $470C, $4B46, $4FC0, $547E, $5984, $5ED6, $647A
+    .WORD $6A73, $70C8, $777D, $7E98, $861F, $8E18, $968B, $9F7F
+    .WORD $A8FB, $B307, $BDAD, $C8F4, $D4E7, $E190, $EEF9, $FD2F
+    .WORD $FFFF, $FFFF, $FFFF, $FFFF, $FFFF, $FFFF, $FFFF, $FFFF

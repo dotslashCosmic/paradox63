@@ -12,7 +12,9 @@ p63-spec = { path = "../p63-spec" }
 p63-cart = { path = "../p63-cart" }
 p63-bus = { path = "../p63-bus" }
 p63-ppu = { path = "../p63-ppu" }
+p63-apu = { path = "../p63-apu" }
 minifb = "0.27"
+cpal = "0.15"
 clap.workspace = true
 anyhow.workspace = true
 rustyline.workspace = true

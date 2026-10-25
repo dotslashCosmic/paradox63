@@ -1,0 +1,43 @@
+; scale.p63 - plays the notes in SCALE on voice 0 until it reaches the 0 at the end
+; Run: p63-sim play games/scale.p63
+
+INCLUDE "p63_hw.inc"
+
+N_FRAMES EQU 15                  ; each note sounds for 15 frames
+GAP_FRAMES  EQU 4                   ; then releases for 4 before the next
+
+ORG $000100
+
+START:
+    CLR A
+    MOV DP,A
+    JSR SND_INIT
+    LD Y,#SCALE
+.NEXT:
+    LD W,0,Y                        ; next pitch, 0 ends the list
+    TST W
+    BEQ .LAST
+    CLR B                           ; voice 0
+    JSR SND_NOTE
+    LD GP,#N_FRAMES
+    JSR WAIT_FRAMES
+    CLR B
+    JSR SND_OFF
+    LD GP,#GAP_FRAMES
+    JSR WAIT_FRAMES
+    LEA Y,2,Y
+    BRA .NEXT
+.LAST:                              ; end of the list: nothing more to play
+    WAITV
+    BRA .LAST
+
+; Wait GP frames (GP >= 1)
+WAIT_FRAMES:
+    WAITV
+    DBNZ GP,WAIT_FRAMES
+    RTS
+
+SCALE:
+    .WORD N_C4, N_D4, N_E4, N_F4, N_G4, N_A4, N_B4, N_C5, 0
+
+INCLUDE "../utils/sound.p63"

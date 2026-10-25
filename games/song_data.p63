@@ -1,0 +1,535 @@
+; song_data.p63 - "Paradox Run", an original metal tune for the MUS_START/MUS_TICK player
+; E minor, 150 BPM: one tick is a sixteenth note, 6 frames. Needs utils/sound.p63
+
+SONG_RUN:
+    .BYTE 6, 8                      ; 6 frames per tick, 8 tracks
+    .ADDR INSTRUMENTS
+    .BYTE 0, 0, 0, 0                  ; voice 0: lead
+    .ADDR ORD_LEAD
+    .DS TR_STATE
+    .BYTE 1, 0, 2, 9                  ; voice 1: echo: the lead again, 9 frames late, a quarter as loud
+    .ADDR ORD_LEAD
+    .DS TR_STATE
+    .BYTE 2, 0, 0, 0                  ; voice 2: harmony arpeggios
+    .ADDR ORD_HARM
+    .DS TR_STATE
+    .BYTE 3, 0, 0, 0                  ; voice 3: bass
+    .ADDR ORD_BASS
+    .DS TR_STATE
+    .BYTE 4, 1, 0, 0                  ; voice 4: snare and cymbals (drum track)
+    .ADDR ORD_CYMB
+    .DS TR_STATE
+    .BYTE 5, 1, 0, 0                  ; voice 5: kick and toms (drum track)
+    .ADDR ORD_KICK
+    .DS TR_STATE
+    .BYTE 6, 0, 0, 0                  ; voice 6: rhythm guitar
+    .ADDR ORD_GTR
+    .DS TR_STATE
+    .BYTE 7, 0, 0, 0                  ; voice 7: twin harmony in the solo
+    .ADDR ORD_TWIN
+    .DS TR_STATE
+
+; Instruments (numbered from 1). Samples: 1 = 50% square, 2 = triangle, 3 = 25% square,
+; 4 = distorted power chord. Effects: 1 = vibrato, 2 = pitch drop, 4 = bend up
+I_LEAD    EQU 1
+I_SOLO    EQU 2
+I_BEND    EQU 3
+I_TWIN    EQU 4
+I_TWINB   EQU 5
+I_HARM    EQU 6
+I_BASS    EQU 7
+I_MUTE    EQU 8
+I_OPEN    EQU 9
+I_RING    EQU 10
+I_SNARE   EQU 11
+I_HAT     EQU 12
+I_RIDE    EQU 13
+I_CRASH   EQU 14
+I_KICK    EQU 15
+I_TOM1    EQU 16
+I_TOM2    EQU 17
+I_TOM3    EQU 18
+I_TOM4    EQU 19
+INSTRUMENTS:
+;         smp ctl volL volR ADSR1 ADSR2 gap fx drop vdly vdep note
+    .BYTE 1, 1, 210, 210, $F6, $AC, 1, 1, 0, 18, 7, 0   ; lead
+    .BYTE 1, 1, 225, 225, $F5, $BC, 1, 1, 0, 10, 6, 0   ; solo
+    .BYTE 1, 1, 225, 225, $F5, $BC, 1, 5, 0, 10, 6, 0   ; bend
+    .BYTE 1, 1, 130, 180, $F5, $BC, 1, 1, 0, 10, 6, 0   ; twin
+    .BYTE 1, 1, 130, 180, $F5, $BC, 1, 5, 0, 10, 6, 0   ; twinb
+    .BYTE 3, 1, 100, 120, $F9, $0C, 1, 0, 0, 0, 0, 0   ; harm
+    .BYTE 2, 1, 230, 230, $F0, $FE, 1, 0, 0, 0, 0, 0   ; bass
+    .BYTE 4, 1, 190, 160, $F9, $0C, 1, 0, 0, 0, 0, 0   ; mute
+    .BYTE 4, 1, 215, 185, $F4, $AC, 1, 0, 0, 0, 0, 0   ; open
+    .BYTE 4, 1, 195, 165, $F1, $8A, 1, 0, 0, 0, 0, 0   ; ring
+    .BYTE 0, 2, 210, 210, $F7, $0C, 1, 0, 0, 0, 0, 21   ; snare
+    .BYTE 0, 2, 85, 85, $FB, $0C, 1, 0, 0, 0, 0, 31   ; hat
+    .BYTE 0, 2, 120, 120, $F7, $0C, 1, 0, 0, 0, 0, 29   ; ride
+    .BYTE 0, 2, 200, 200, $F4, $0C, 1, 0, 0, 0, 0, 27   ; crash
+    .BYTE 2, 1, 255, 255, $F8, $0C, 1, 2, 2, 0, 0, M_G3   ; kick
+    .BYTE 2, 1, 230, 230, $F7, $0C, 1, 2, 4, 0, 0, M_B3   ; tom1
+    .BYTE 2, 1, 230, 230, $F7, $0C, 1, 2, 4, 0, 0, M_G3   ; tom2
+    .BYTE 2, 1, 235, 235, $F7, $0C, 1, 2, 4, 0, 0, M_D3   ; tom3
+    .BYTE 2, 1, 240, 240, $F7, $0C, 1, 2, 4, 0, 0, M_AS2   ; tom4
+
+; Order lists: the intro bar plays once, then the rest loops
+ORD_LEAD:
+    .ADDR REST_BAR
+ORD_LEAD_LOOP:
+    .ADDR LEAD_01, LEAD_02, LEAD_03, LEAD_04, LEAD_05, LEAD_06, LEAD_07, LEAD_08
+    .ADDR LEAD_09, LEAD_10, LEAD_11, LEAD_12, LEAD_13, LEAD_14, LEAD_15, LEAD_16
+    .ADDR SOLO_1, SOLO_2, SOLO_3, SOLO_4, SOLO_5, SOLO_6, SOLO_7, SOLO_8
+    .ADDR 0, ORD_LEAD_LOOP
+ORD_TWIN:
+    .ADDR REST_BAR
+ORD_TWIN_LOOP:
+    .ADDR REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR
+    .ADDR REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR
+    .ADDR TWIN_1, TWIN_2, TWIN_3, TWIN_4, TWIN_5, TWIN_6, TWIN_7, TWIN_8
+    .ADDR 0, ORD_TWIN_LOOP
+ORD_HARM:
+    .ADDR REST_BAR
+ORD_HARM_LOOP:
+    .ADDR HARM_EM, HARM_C, HARM_G, HARM_D, HARM_EM, HARM_C, HARM_AM, HARM_B
+    .ADDR HARM_C, HARM_D, HARM_BM, HARM_EM, HARM_AM, HARM_D, HARM_G, HARM_B
+    .ADDR REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR, REST_BAR
+    .ADDR 0, ORD_HARM_LOOP
+ORD_BASS:
+    .ADDR BASS_EM
+ORD_BASS_LOOP:
+    .ADDR BASS_EM, BASS_C, BASS_G, BASS_D, BASS_EM, BASS_C, BASS_AM, BASS_B
+    .ADDR BASS_C, BASS_D, BASS_BM, BASS_EM, BASS_AM, BASS_D, BASS_G, BASS_B
+    .ADDR BASS_EM, BASS_C, BASS_AM, BASS_B, BASS_EM, BASS_C, BASS_B, BASS_B
+    .ADDR 0, ORD_BASS_LOOP
+ORD_GTR:
+    .ADDR REST_BAR
+ORD_GTR_LOOP:
+    .ADDR GTR_V_EM, GTR_V_C, GTR_V_G, GTR_V_D, GTR_V_EM, GTR_V_C, GTR_V_AM, GTR_V_B
+    .ADDR GTR_H_C, GTR_H_D, GTR_H_BM, GTR_H_EM, GTR_H_AM, GTR_H_D, GTR_H_G, GTR_H_B
+    .ADDR GTR_S_EM, GTR_S_C, GTR_S_AM, GTR_S_B, GTR_S_EM, GTR_S_C, GTR_S_B, GTR_S_B
+    .ADDR 0, ORD_GTR_LOOP
+ORD_CYMB:
+    .ADDR CYM_INTRO
+ORD_CYMB_LOOP:
+    .ADDR CYM_VERSE_CRASH, CYM_VERSE, CYM_VERSE, CYM_VERSE_FILL, CYM_VERSE_CRASH, CYM_VERSE, CYM_VERSE, CYM_VERSE_FILL
+    .ADDR CYM_HEAVY, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY_FILL, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY_FILL
+    .ADDR CYM_HEAVY, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY_FILL, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY, CYM_HEAVY_FILL
+    .ADDR 0, ORD_CYMB_LOOP
+ORD_KICK:
+    .ADDR KICK_INTRO
+ORD_KICK_LOOP:
+    .ADDR KICK_VERSE, KICK_VERSE, KICK_VERSE, KICK_VERSE_FILL, KICK_VERSE, KICK_VERSE, KICK_VERSE, KICK_VERSE_FILL
+    .ADDR KICK_HEAVY, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY_FILL, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY_FILL
+    .ADDR KICK_HEAVY, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY_FILL, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY, KICK_HEAVY_FILL
+    .ADDR 0, ORD_KICK_LOOP
+
+; Patterns: note, ticks
+REST_BAR:
+    .BYTE MUS_REST,16, MUS_END
+
+; the tune
+LEAD_01:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_B4,2, M_E5,2, M_G5,2, M_FS5,2, M_E5,4, M_B4,2, M_D5,2
+    .BYTE MUS_END
+LEAD_02:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_C5,2, M_E5,2, M_G5,3, M_E5,1, M_D5,4, M_C5,2, M_B4,2
+    .BYTE MUS_END
+LEAD_03:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_B4,2, M_D5,2, M_G5,2, M_B5,2, M_A5,4, M_G5,2, M_D5,2
+    .BYTE MUS_END
+LEAD_04:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_FS5,6, M_E5,2, M_D5,4, M_A4,4
+    .BYTE MUS_END
+LEAD_05:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_B4,2, M_E5,2, M_G5,2, M_FS5,2, M_E5,2, M_FS5,2, M_G5,2, M_A5,2
+    .BYTE MUS_END
+LEAD_06:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_B5,4, M_G5,2, M_E5,2, M_C5,4, M_E5,4
+    .BYTE MUS_END
+LEAD_07:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_A5,2, M_G5,2, M_E5,2, M_C5,2, M_A4,4, M_C5,2, M_E5,2
+    .BYTE MUS_END
+LEAD_08:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_DS5,6, M_FS5,2, M_B5,8
+    .BYTE MUS_END
+LEAD_09:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_E5,4, M_G5,4, M_C6,6, M_B5,2
+    .BYTE MUS_END
+LEAD_10:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_A5,4, M_FS5,4, M_D5,6, M_E5,2
+    .BYTE MUS_END
+LEAD_11:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_FS5,2, M_D5,2, M_B4,2, M_D5,2, M_FS5,4, M_B5,4
+    .BYTE MUS_END
+LEAD_12:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_G5,6, M_FS5,2, M_E5,8
+    .BYTE MUS_END
+LEAD_13:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_C5,2, M_E5,2, M_A5,2, M_C6,2, M_B5,2, M_A5,2, M_G5,2, M_E5,2
+    .BYTE MUS_END
+LEAD_14:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_FS5,4, M_A5,4, M_D6,4, M_C6,2, M_A5,2
+    .BYTE MUS_END
+LEAD_15:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_B5,2, M_A5,2, M_G5,2, M_D5,2, M_B4,2, M_D5,2, M_G5,4
+    .BYTE MUS_END
+LEAD_16:
+    .BYTE MUS_INS, I_LEAD
+    .BYTE M_FS5,4, M_DS5,4, M_B4,4, MUS_REST,4
+    .BYTE MUS_END
+SOLO_1:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_E5,1, M_FS5,1, M_G5,1, M_B5,1, M_E6,2, M_DS6,1, M_E6,1, M_B5,1, M_G5,1, M_E5,1, M_B4,1, M_E5,4
+    .BYTE MUS_END
+SOLO_2:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_C5,1, M_E5,1, M_G5,1, M_C6,1, M_E6,2, M_D6,1, M_C6,1, M_B5,1, M_A5,1, M_G5,1, M_E5,1, M_G5,4
+    .BYTE MUS_END
+SOLO_3:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_A5,1, M_B5,1, M_C6,1, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_A5,1, M_G5,1, M_A5,1, M_B5,1, M_C6,1, M_B5,4
+    .BYTE MUS_END
+SOLO_4:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_DS5,1, M_FS5,1, M_B5,1, M_DS6,1, M_FS6,2, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_A5,1, M_FS5,1, M_DS5,4
+    .BYTE MUS_END
+SOLO_5:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_E5,1, M_G5,1, M_B5,1, M_E6,1, M_B5,1, M_G5,1, M_E5,1, M_G5,1, M_B5,1, M_E6,1, M_G6,2, M_FS6,1, M_E6,1, M_DS6,2
+    .BYTE MUS_END
+SOLO_6:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_E6,2, M_C6,2, M_G5,1, M_E5,1, M_G5,1, M_C6,1, M_E6,4, M_D6,2, M_C6,2
+    .BYTE MUS_END
+SOLO_7:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE M_FS6,1, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_A5,1, M_G5,1, M_FS5,1, M_E5,1, M_DS5,1, M_C5,1, M_B4,1, M_DS5,2, M_FS5,2
+    .BYTE MUS_END
+SOLO_8:
+    .BYTE MUS_INS, I_SOLO
+    .BYTE MUS_INS, I_BEND
+    .BYTE M_B5,8, MUS_REST,8
+    .BYTE MUS_END
+
+; the twin guitar: a diatonic third above the solo
+TWIN_1:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_G5,1, M_A5,1, M_B5,1, M_DS6,1, M_G6,2, M_FS6,1, M_G6,1, M_DS6,1, M_B5,1, M_G5,1, M_DS5,1, M_G5,4
+    .BYTE MUS_END
+TWIN_2:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_E5,1, M_G5,1, M_B5,1, M_E6,1, M_G6,2, M_F6,1, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_G5,1, M_B5,4
+    .BYTE MUS_END
+TWIN_3:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_C6,1, M_DS6,1, M_E6,1, M_G6,1, M_FS6,1, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_C6,1, M_DS6,1, M_E6,1, M_DS6,4
+    .BYTE MUS_END
+TWIN_4:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_FS5,1, M_A5,1, M_DS6,1, M_FS6,1, M_A6,2, M_G6,1, M_FS6,1, M_E6,1, M_DS6,1, M_C6,1, M_A5,1, M_FS5,4
+    .BYTE MUS_END
+TWIN_5:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_G5,1, M_B5,1, M_DS6,1, M_G6,1, M_DS6,1, M_B5,1, M_G5,1, M_B5,1, M_DS6,1, M_G6,1, M_B6,2, M_A6,1, M_G6,1, M_FS6,2
+    .BYTE MUS_END
+TWIN_6:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_G6,2, M_E6,2, M_B5,1, M_G5,1, M_B5,1, M_E6,1, M_G6,4, M_F6,2, M_E6,2
+    .BYTE MUS_END
+TWIN_7:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE M_A6,1, M_G6,1, M_FS6,1, M_E6,1, M_DS6,1, M_C6,1, M_B5,1, M_A5,1, M_G5,1, M_FS5,1, M_E5,1, M_DS5,1, M_FS5,2, M_A5,2
+    .BYTE MUS_END
+TWIN_8:
+    .BYTE MUS_INS, I_TWIN
+    .BYTE MUS_INS, I_TWINB
+    .BYTE M_DS6,8, MUS_REST,8
+    .BYTE MUS_END
+
+; harmony arpeggios, one bar per chord
+HARM_EM:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_E4,2, M_G4,2, M_B4,2, M_G4,2, M_E4,2, M_G4,2, M_B4,2, M_G4,2
+    .BYTE MUS_END
+HARM_C:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_C4,2, M_E4,2, M_G4,2, M_E4,2, M_C4,2, M_E4,2, M_G4,2, M_E4,2
+    .BYTE MUS_END
+HARM_G:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_D4,2, M_G4,2, M_B4,2, M_G4,2, M_D4,2, M_G4,2, M_B4,2, M_G4,2
+    .BYTE MUS_END
+HARM_D:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_D4,2, M_FS4,2, M_A4,2, M_FS4,2, M_D4,2, M_FS4,2, M_A4,2, M_FS4,2
+    .BYTE MUS_END
+HARM_AM:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_C4,2, M_E4,2, M_A4,2, M_E4,2, M_C4,2, M_E4,2, M_A4,2, M_E4,2
+    .BYTE MUS_END
+HARM_B:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_DS4,2, M_FS4,2, M_B4,2, M_FS4,2, M_DS4,2, M_FS4,2, M_B4,2, M_FS4,2
+    .BYTE MUS_END
+HARM_BM:
+    .BYTE MUS_INS, I_HARM
+    .BYTE M_D4,2, M_FS4,2, M_B4,2, M_FS4,2, M_D4,2, M_FS4,2, M_B4,2, M_FS4,2
+    .BYTE MUS_END
+
+; bass: the root in eighths, jumping an octave
+BASS_EM:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_E2,2, M_E3,2, M_E2,2, M_E3,2, M_E2,2, M_E3,2, M_E2,2, M_E3,2
+    .BYTE MUS_END
+BASS_C:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_C2,2, M_C3,2, M_C2,2, M_C3,2, M_C2,2, M_C3,2, M_C2,2, M_C3,2
+    .BYTE MUS_END
+BASS_G:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_G2,2, M_G3,2, M_G2,2, M_G3,2, M_G2,2, M_G3,2, M_G2,2, M_G3,2
+    .BYTE MUS_END
+BASS_D:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_D2,2, M_D3,2, M_D2,2, M_D3,2, M_D2,2, M_D3,2, M_D2,2, M_D3,2
+    .BYTE MUS_END
+BASS_AM:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_A2,2, M_A3,2, M_A2,2, M_A3,2, M_A2,2, M_A3,2, M_A2,2, M_A3,2
+    .BYTE MUS_END
+BASS_B:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_B1,2, M_B2,2, M_B1,2, M_B2,2, M_B1,2, M_B2,2, M_B1,2, M_B2,2
+    .BYTE MUS_END
+BASS_BM:
+    .BYTE MUS_INS, I_BASS
+    .BYTE M_B1,2, M_B2,2, M_B1,2, M_B2,2, M_B1,2, M_B2,2, M_B1,2, M_B2,2
+    .BYTE MUS_END
+
+; rhythm guitar: V = verse gallop, H = heavy chugs, S = held chords under the solo
+GTR_H_EM:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_E3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_E3,1, M_E3,1, M_E3,1, M_E3,1, M_E3,1, M_E3,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_E3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_E3,1, M_E3,1, M_E3,1, M_E3,1, M_E3,1, M_E3,1
+    .BYTE MUS_END
+GTR_H_G:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_G2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_G2,1, M_G2,1, M_G2,1, M_G2,1, M_G2,1, M_G2,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_G2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_G2,1, M_G2,1, M_G2,1, M_G2,1, M_G2,1, M_G2,1
+    .BYTE MUS_END
+GTR_H_AM:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_A2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_A2,1, M_A2,1, M_A2,1, M_A2,1, M_A2,1, M_A2,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_A2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_A2,1, M_A2,1, M_A2,1, M_A2,1, M_A2,1, M_A2,1
+    .BYTE MUS_END
+GTR_H_B:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1
+    .BYTE MUS_END
+GTR_H_BM:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1, M_B2,1
+    .BYTE MUS_END
+GTR_H_C:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_C3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_C3,1, M_C3,1, M_C3,1, M_C3,1, M_C3,1, M_C3,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_C3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_C3,1, M_C3,1, M_C3,1, M_C3,1, M_C3,1, M_C3,1
+    .BYTE MUS_END
+GTR_H_D:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_D3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_D3,1, M_D3,1, M_D3,1, M_D3,1, M_D3,1, M_D3,1
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_D3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_D3,1, M_D3,1, M_D3,1, M_D3,1, M_D3,1, M_D3,1
+    .BYTE MUS_END
+GTR_S_EM:
+    .BYTE MUS_INS, I_RING
+    .BYTE M_E3,8, M_E3,8
+    .BYTE MUS_END
+GTR_S_AM:
+    .BYTE MUS_INS, I_RING
+    .BYTE M_A2,8, M_A2,8
+    .BYTE MUS_END
+GTR_S_B:
+    .BYTE MUS_INS, I_RING
+    .BYTE M_B2,8, M_B2,8
+    .BYTE MUS_END
+GTR_S_C:
+    .BYTE MUS_INS, I_RING
+    .BYTE M_C3,8, M_C3,8
+    .BYTE MUS_END
+GTR_V_EM:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_E3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_E3,1, M_E3,1, M_E3,2, M_E3,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_E3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_E3,1, M_E3,1, M_E3,2, M_E3,2
+    .BYTE MUS_END
+GTR_V_G:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_G2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_G2,1, M_G2,1, M_G2,2, M_G2,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_G2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_G2,1, M_G2,1, M_G2,2, M_G2,2
+    .BYTE MUS_END
+GTR_V_AM:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_A2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_A2,1, M_A2,1, M_A2,2, M_A2,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_A2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_A2,1, M_A2,1, M_A2,2, M_A2,2
+    .BYTE MUS_END
+GTR_V_B:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,2, M_B2,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_B2,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_B2,1, M_B2,1, M_B2,2, M_B2,2
+    .BYTE MUS_END
+GTR_V_C:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_C3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_C3,1, M_C3,1, M_C3,2, M_C3,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_C3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_C3,1, M_C3,1, M_C3,2, M_C3,2
+    .BYTE MUS_END
+GTR_V_D:
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_D3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_D3,1, M_D3,1, M_D3,2, M_D3,2
+    .BYTE MUS_INS, I_OPEN
+    .BYTE M_D3,2
+    .BYTE MUS_INS, I_MUTE
+    .BYTE M_D3,1, M_D3,1, M_D3,2, M_D3,2
+    .BYTE MUS_END
+
+; drums: in a drum track each note is an instrument
+CYM_INTRO:
+    .BYTE I_HAT,2, I_HAT,2, I_HAT,2, I_HAT,2, I_HAT,2, I_SNARE,1, I_SNARE,1, I_SNARE,1, I_SNARE,1, I_SNARE,1, I_SNARE,1
+    .BYTE MUS_END
+KICK_INTRO:
+    .BYTE I_KICK,4, I_KICK,4, I_KICK,4, I_KICK,4
+    .BYTE MUS_END
+CYM_VERSE_CRASH:
+    .BYTE I_CRASH,2, I_HAT,2, I_SNARE,2, I_HAT,2, I_HAT,2, I_HAT,2, I_SNARE,2, I_HAT,2
+    .BYTE MUS_END
+KICK_VERSE:
+    .BYTE I_KICK,2, I_KICK,1, I_KICK,5, I_KICK,2, I_KICK,1, I_KICK,5
+    .BYTE MUS_END
+CYM_VERSE:
+    .BYTE I_HAT,2, I_HAT,2, I_SNARE,2, I_HAT,2, I_HAT,2, I_HAT,2, I_SNARE,2, I_HAT,2
+    .BYTE MUS_END
+CYM_VERSE_FILL:
+    .BYTE I_HAT,2, I_HAT,2, I_SNARE,2, I_HAT,2, I_HAT,2, I_HAT,6
+    .BYTE MUS_END
+KICK_VERSE_FILL:
+    .BYTE I_KICK,2, I_KICK,1, I_KICK,5, I_KICK,2, I_KICK,1, I_KICK,1, I_TOM1,1, I_TOM2,1, I_TOM3,1, I_TOM4,1
+    .BYTE MUS_END
+CYM_HEAVY:
+    .BYTE I_CRASH,4, I_SNARE,4, I_RIDE,4, I_SNARE,4
+    .BYTE MUS_END
+KICK_HEAVY:
+    .BYTE I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1
+    .BYTE MUS_END
+CYM_HEAVY_FILL:
+    .BYTE I_CRASH,4, I_SNARE,4, I_RIDE,8
+    .BYTE MUS_END
+KICK_HEAVY_FILL:
+    .BYTE I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_KICK,1, I_TOM1,1, I_TOM2,1, I_TOM3,1, I_TOM4,1
+    .BYTE MUS_END
+
+; waves for Audio RAM $0100: 50% square (sample 1), stepped triangle (2), 25% square (3),
+; distorted power chord (4: root, fifth and octave clipped, two root cycles long)
+SONG_WAVES:
+    .BYTE $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F
+    .BYTE $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81
+    .BYTE $7F, $7F, $6E, $6E, $5E, $5E, $4C, $4C, $3C, $3C, $2A, $2A, $1A, $1A, $08, $08
+    .BYTE $F8, $F8, $E6, $E6, $D6, $D6, $C4, $C4, $B4, $B4, $A2, $A2, $92, $92, $81, $81
+    .BYTE $81, $81, $92, $92, $A2, $A2, $B4, $B4, $C4, $C4, $D6, $D6, $E6, $E6, $F8, $F8
+    .BYTE $08, $08, $1A, $1A, $2A, $2A, $3C, $3C, $4C, $4C, $5E, $5E, $6E, $6E, $7F, $7F
+    .BYTE $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81
+    .BYTE $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $81, $82, $82, $83, $84
+    .BYTE $87, $8B, $93, $9F, $B2, $CD, $EE, $13, $34, $4F, $62, $6E, $75, $79, $7C, $7D
+    .BYTE $E1, $05, $28, $46, $5B, $6A, $73, $78, $7B, $7D, $7E, $85, $88, $8D, $96, $A4
+    .BYTE $BA, $D7, $FA, $1E, $3E, $56, $66, $70, $77, $7A, $7C, $7D, $7E, $7F, $7F, $7F
+    .BYTE $81, $81, $81, $81, $82, $83, $84, $86, $89, $90, $9A, $AA, $C2, $E2, $06, $29
+    .BYTE $46, $5C, $6A, $73, $78, $7B, $82, $83, $85, $88, $8D, $96, $A5, $BA, $D8, $FB
+    .BYTE $82, $83, $84, $87, $8B, $92, $9E, $B1, $CC, $ED, $12, $33, $4E, $61, $6D, $75
+    .BYTE $79, $7C, $7D, $7E, $7E, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F, $7F
+; directory entries for samples 1-4: START, LOOP, END, reserved
+SONG_DIR:
+    .WORD $0100, $0100, $0140, 0
+    .WORD $0140, $0140, $0180, 0
+    .WORD $0180, $0180, $01C0, 0
+    .WORD $01C0, $01C0, $0240, 0

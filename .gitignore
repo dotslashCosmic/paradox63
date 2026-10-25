@@ -10,6 +10,8 @@
 !/p63-cart/
 !/p63-bus/
 !/p63-ppu/
+!/p63-apu/
 !/utils/
+!/games/
 
 target/

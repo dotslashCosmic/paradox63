@@ -1,4 +1,4 @@
-//! I/O devices: video registers, keyboard/pad, cart registers, audio stub.
+//! I/O devices: video registers, keyboard/pad, cart registers, audio.
 
 use p63_spec as spec;
 
@@ -130,24 +130,12 @@ impl Device for CartPort {
     }
 }
 
-/// Audio registers, stored but not played yet.
-#[derive(Debug, Clone)]
-pub struct Audio {
-    regs: [u8; 128],
-}
-
-impl Default for Audio {
-    fn default() -> Self {
-        Self { regs: [0; 128] }
-    }
-}
-
-impl Device for Audio {
+impl Device for p63_apu::Apu {
     fn read(&mut self, off: u32) -> u8 {
-        self.regs[off as usize]
+        p63_apu::Apu::read(self, off)
     }
 
     fn write(&mut self, off: u32, value: u8) {
-        self.regs[off as usize] = value;
+        p63_apu::Apu::write(self, off, value);
     }
 }

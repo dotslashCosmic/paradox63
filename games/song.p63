@@ -1,0 +1,28 @@
+; song.p63 - "Paradox Run", an original metal tune on all eight voices, in E minor
+; voice 0 = lead, 1 = echo, 2 = harmony, 3 = bass, 4 = snare and cymbals,
+; 5 = kick and toms, 6 = rhythm guitar power chords, 7 = twin harmony in the solo
+; Run: p63-sim play games/song.p63
+
+INCLUDE "p63_hw.inc"
+
+ORG $000100
+
+START:
+    CLR A
+    MOV DP,A
+    JSR SND_INIT                    ; engine on, master volume, directory at $2000
+    LD X,#SONG_WAVES                ; four waves to Audio RAM $0100
+    LD Y,#ARAM_BASE+$0100
+    MOVB [X],[Y],#320
+    LD X,#SONG_DIR                  ; directory entries for samples 1-4
+    LD Y,#ARAM_BASE+SND_DIR*256+8
+    MOVB [X],[Y],#32
+    LD X,#SONG_RUN
+    JSR MUS_START
+.LOOP:
+    WAITV
+    JSR MUS_TICK
+    BRA .LOOP
+
+INCLUDE "../utils/sound.p63"
+INCLUDE "song_data.p63"
