@@ -1,0 +1,118 @@
+; Paradox63 Assembly PRNG Subroutines
+; 8/16/32-bit pseudo random number generator with seed (RAND8, RAND16, RAND32, RAND_SEED8, RAND_SEED16, RAND_SEED32)
+; Registers: 
+; A(8 high):B(8 low)=D(16 high)
+; E(8 high):F(8 low)=W(16 low)
+; D(16 high):W(16 low)=Q(32)
+; GP(8) X(24, index) Y(24, index)
+
+; 8-bit PRNG
+; Avalanche dev 0.0625 (1, 7, 3)
+; Output: A = random byte (0-255)
+; Example use:
+;   JSR RAND8               ; A now contains random 0-255
+; Seed the RNG
+; Input: A = seed, Output: A = random byte (0-255)
+; Example use:
+;   LD A,#$42               ; Seed with 0x42
+;   JSR RAND_SEED8
+RAND8:                      ; 28 cycles
+    PUSH B                  ; Save previous state
+    LD A,PRNG_8             ; Load state
+    MOV B,A                 ; Save copy
+    LSL A,#1                ; A = state << 1
+    XOR A,B                 ; A = state ^ (state << 1)
+    MOV B,A                 ; Save result in B
+    LSR A,#7                ; A = result >> 7
+    XOR A,B                 ; A = result ^ (result >> 7)
+    MOV B,A                 ; Save result in B
+    LSL A,#3                ; A = result << 3
+    XOR A,B                 ; A = result ^ (result << 3)
+    ST A,PRNG_8             ; Save new state
+    POP B                   ; Restore previous state
+    RTS                     ; Return
+
+PRNG_8: .BYTE $FB           ; 251, prime
+
+RAND_SEED8:
+    TST A                   ; Check full 8-bit A for zero
+    BNE .OK                 ; If not equal, goto .ok
+    LD A,#$FB               ; Zero would stick at zero, use the prime
+.OK:
+    ST A,PRNG_8             ; Save input
+    BRA RAND8               ; Return the first random byte from this seed
+
+
+; 16-bit PRNG
+; Avalanche dev 0.1016 (1, 5, 2)
+; Output: D = random byte (0-65535)
+; Example use:
+;   JSR RAND16              ; D now contains random 0-65535
+; Seed the RNG
+; Input: D = seed, Output: D = random byte (0-65535)
+; Example use:
+;   LD D,#$42               ; Seed with 0x42
+;   JSR RAND_SEED16
+RAND16:                     ; 27 cycles
+    PUSH W                  ; Save previous state
+    LD D,PRNG_16            ; Load 16-bit state
+    MOV W,D                 ; Save copy
+    LSL W,#1                ; W = state << 1
+    XOR D,W                 ; D = state ^ (state << 1)
+    MOV W,D                 ; Save result
+    LSR W,#5                ; W = result >> 5
+    XOR D,W                 ; D = result ^ (result >> 5)
+    MOV W,D                 ; Save result
+    LSL W,#2                ; W = result << 2
+    XOR D,W                 ; D = result ^ (result << 2)
+    ST D,PRNG_16            ; Save new state
+    POP W                   ; Restore previous state
+    RTS                     ; Return
+
+PRNG_16: .WORD $FFF1        ; 65521, prime
+
+RAND_SEED16:
+    TST D                   ; Check full 16-bit D for zero
+    BNE .OK                 ; If not equal, goto .ok
+    LD D,#$FFF1             ; Zero would stick at zero, use the prime
+.OK:
+    ST D,PRNG_16            ; Save input
+    BRA RAND16              ; Return the first random value from this seed
+
+; 32-bit PRNG
+; Marsaglia xorshift32 (13, 17, 5)
+; Output: Q = random 32-bit value (0-4294967295)
+; Example use:
+;   JSR RAND32              ; Q now contains random 0-4294967295
+; Seed the RNG
+; Input: Q = seed, Output: Q = random 32-bit value
+; Example use:
+;   LD Q,#$12345678         ; Seed
+;   JSR RAND_SEED32
+RAND32:                     ; 70 cycles
+    LD Q,PRNG_32            ; Load state
+    ST Q,PRNG_TMP           ; Save copy
+    LSL Q,#13               ; Q = state << 13
+    XOR Q,PRNG_TMP          ; Q = state ^ (state << 13)
+    ST Q,PRNG_TMP           ; Save result
+    LSR Q,#17               ; Q = result >> 17
+    XOR Q,PRNG_TMP          ; Q = state ^ (state << 17)
+    ST Q,PRNG_TMP           ; Save result
+    LSL Q,#5                ; Q = result << 5
+    XOR Q,PRNG_TMP          ; Q = state ^ (state << 5)
+    ST Q,PRNG_32            ; Save new state
+    RTS
+
+PRNG_32:
+    .LONG $FFFFFFFB         ; 4294967291, prime
+
+PRNG_TMP:
+    .LONG $00000000         ; scratch
+
+RAND_SEED32:
+    TST Q                   ; Check full 32-bit Q for zero
+    BNE .OK                 ; If not equal, goto .ok
+    LD Q,#$FFFFFFFB         ; Zero would stick at zero, use the prime
+.OK:
+    ST Q,PRNG_32            ; Save input
+    BRA RAND32              ; Return the first random value from this seed

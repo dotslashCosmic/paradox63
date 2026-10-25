@@ -1,0 +1,120 @@
+; crc16.p63 - CRC-16/CCITT-FALSE, table driven
+; Parameters : poly $1021, init $FFFF, MSB-first, no reflection, xorout $0000
+; Check value: CRC of ASCII "123456789" = $29B1
+; Public:
+;   CRC16_INIT   EQU $FFFF     Starting value for a fresh CRC.
+;   CRC16_BLOCK                Feed a block of bytes into a running CRC.
+; CRC16_BLOCK
+;   In : W = running CRC (load #CRC16_INIT to start a new one)
+;        Y = address of first byte
+;        X = byte count, 24-bit (0 is allowed and does nothing)
+;   Out: W = updated CRC
+;        Y = Y + count (so consecutive calls can chain over adjacent data)
+;   Clobbers: A (so the D and Q composites), X, GP, CC. B, E/F-as-W and Y are as above.
+;   Stack: about 9 bytes at the deepest point (JSR + BSR return + one saved X).
+;   Speed: about 17 cycles/byte
+; Streaming: call once per region and keep W between calls, e.g. to skip a field inside an image, CRC the bytes before it, CRC a zero buffer in its place, then CRC the bytes after it.
+; Method: crc = (crc << 8) ^ T[(crc >> 8) ^ byte]. The 16-bit table is stored as two 256-byte tables (high bytes, low bytes) so the lookup needs no scaling; (crc << 8) leaves F in the high byte, so:
+;     new E = F ^ TAB_HI[idx]        new F = TAB_LO[idx]
+; Placement: INCLUDE emits bytes in sequence at the directive, so include this file inside a code/data area, not ahead of your first ORG. The table is reached with an indexed offset equal to its address, so keep it below $800000.
+; Labels are global; internals are prefixed _CRC16_.
+
+CRC16_INIT      EQU $FFFF
+
+CRC16_BLOCK:
+    CMP X,#256
+    BCS _CRC16_TAIL             ; fewer than 256 bytes left (borrow)
+    LEA X,-256,X                ; bytes remaining after this 256-byte block
+    PUSH X
+    LD GP,#0                    ; 0 means 256 iterations
+    BSR _CRC16_RUN
+    POP X
+    BRA CRC16_BLOCK
+_CRC16_TAIL:
+    CMP X,#0
+    BEQ _CRC16_DONE
+    MOV GP,X                    ; X < 256, so the low byte is the whole count
+    BSR _CRC16_RUN
+_CRC16_DONE:
+    RTS
+
+; GP = byte count (0 = 256), Y = data pointer, W = CRC. Clobbers A, X, GP.
+_CRC16_RUN:
+    LD A,0,Y
+    XOR A,E                     ; A = (crc >> 8) ^ byte = table index
+    MOV X,A                     ; zero-extends 8 -> 24 bits
+    LD A,CRC16_TAB_HI,X
+    XOR A,F                     ; new high byte = F ^ TAB_HI[idx]
+    LD F,CRC16_TAB_LO,X         ; new low byte  = TAB_LO[idx]
+    MOV E,A
+    INC Y
+    DEC GP
+    BNE _CRC16_RUN
+    RTS
+
+CRC16_TAB_HI:
+    .BYTE $00,$10,$20,$30,$40,$50,$60,$70
+    .BYTE $81,$91,$A1,$B1,$C1,$D1,$E1,$F1
+    .BYTE $12,$02,$32,$22,$52,$42,$72,$62
+    .BYTE $93,$83,$B3,$A3,$D3,$C3,$F3,$E3
+    .BYTE $24,$34,$04,$14,$64,$74,$44,$54
+    .BYTE $A5,$B5,$85,$95,$E5,$F5,$C5,$D5
+    .BYTE $36,$26,$16,$06,$76,$66,$56,$46
+    .BYTE $B7,$A7,$97,$87,$F7,$E7,$D7,$C7
+    .BYTE $48,$58,$68,$78,$08,$18,$28,$38
+    .BYTE $C9,$D9,$E9,$F9,$89,$99,$A9,$B9
+    .BYTE $5A,$4A,$7A,$6A,$1A,$0A,$3A,$2A
+    .BYTE $DB,$CB,$FB,$EB,$9B,$8B,$BB,$AB
+    .BYTE $6C,$7C,$4C,$5C,$2C,$3C,$0C,$1C
+    .BYTE $ED,$FD,$CD,$DD,$AD,$BD,$8D,$9D
+    .BYTE $7E,$6E,$5E,$4E,$3E,$2E,$1E,$0E
+    .BYTE $FF,$EF,$DF,$CF,$BF,$AF,$9F,$8F
+    .BYTE $91,$81,$B1,$A1,$D1,$C1,$F1,$E1
+    .BYTE $10,$00,$30,$20,$50,$40,$70,$60
+    .BYTE $83,$93,$A3,$B3,$C3,$D3,$E3,$F3
+    .BYTE $02,$12,$22,$32,$42,$52,$62,$72
+    .BYTE $B5,$A5,$95,$85,$F5,$E5,$D5,$C5
+    .BYTE $34,$24,$14,$04,$74,$64,$54,$44
+    .BYTE $A7,$B7,$87,$97,$E7,$F7,$C7,$D7
+    .BYTE $26,$36,$06,$16,$66,$76,$46,$56
+    .BYTE $D9,$C9,$F9,$E9,$99,$89,$B9,$A9
+    .BYTE $58,$48,$78,$68,$18,$08,$38,$28
+    .BYTE $CB,$DB,$EB,$FB,$8B,$9B,$AB,$BB
+    .BYTE $4A,$5A,$6A,$7A,$0A,$1A,$2A,$3A
+    .BYTE $FD,$ED,$DD,$CD,$BD,$AD,$9D,$8D
+    .BYTE $7C,$6C,$5C,$4C,$3C,$2C,$1C,$0C
+    .BYTE $EF,$FF,$CF,$DF,$AF,$BF,$8F,$9F
+    .BYTE $6E,$7E,$4E,$5E,$2E,$3E,$0E,$1E
+CRC16_TAB_LO:
+    .BYTE $00,$21,$42,$63,$84,$A5,$C6,$E7
+    .BYTE $08,$29,$4A,$6B,$8C,$AD,$CE,$EF
+    .BYTE $31,$10,$73,$52,$B5,$94,$F7,$D6
+    .BYTE $39,$18,$7B,$5A,$BD,$9C,$FF,$DE
+    .BYTE $62,$43,$20,$01,$E6,$C7,$A4,$85
+    .BYTE $6A,$4B,$28,$09,$EE,$CF,$AC,$8D
+    .BYTE $53,$72,$11,$30,$D7,$F6,$95,$B4
+    .BYTE $5B,$7A,$19,$38,$DF,$FE,$9D,$BC
+    .BYTE $C4,$E5,$86,$A7,$40,$61,$02,$23
+    .BYTE $CC,$ED,$8E,$AF,$48,$69,$0A,$2B
+    .BYTE $F5,$D4,$B7,$96,$71,$50,$33,$12
+    .BYTE $FD,$DC,$BF,$9E,$79,$58,$3B,$1A
+    .BYTE $A6,$87,$E4,$C5,$22,$03,$60,$41
+    .BYTE $AE,$8F,$EC,$CD,$2A,$0B,$68,$49
+    .BYTE $97,$B6,$D5,$F4,$13,$32,$51,$70
+    .BYTE $9F,$BE,$DD,$FC,$1B,$3A,$59,$78
+    .BYTE $88,$A9,$CA,$EB,$0C,$2D,$4E,$6F
+    .BYTE $80,$A1,$C2,$E3,$04,$25,$46,$67
+    .BYTE $B9,$98,$FB,$DA,$3D,$1C,$7F,$5E
+    .BYTE $B1,$90,$F3,$D2,$35,$14,$77,$56
+    .BYTE $EA,$CB,$A8,$89,$6E,$4F,$2C,$0D
+    .BYTE $E2,$C3,$A0,$81,$66,$47,$24,$05
+    .BYTE $DB,$FA,$99,$B8,$5F,$7E,$1D,$3C
+    .BYTE $D3,$F2,$91,$B0,$57,$76,$15,$34
+    .BYTE $4C,$6D,$0E,$2F,$C8,$E9,$8A,$AB
+    .BYTE $44,$65,$06,$27,$C0,$E1,$82,$A3
+    .BYTE $7D,$5C,$3F,$1E,$F9,$D8,$BB,$9A
+    .BYTE $75,$54,$37,$16,$F1,$D0,$B3,$92
+    .BYTE $2E,$0F,$6C,$4D,$AA,$8B,$E8,$C9
+    .BYTE $26,$07,$64,$45,$A2,$83,$E0,$C1
+    .BYTE $1F,$3E,$5D,$7C,$9B,$BA,$D9,$F8
+    .BYTE $17,$36,$55,$74,$93,$B2,$D1,$F0

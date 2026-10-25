@@ -1,0 +1,196 @@
+; Paradox63 Assembly Bitops Subroutines
+; Count leading/trailing zeroes/ones, population count, parity, reverse (LEAD_Z, LEAD_1, TRAIL_Z, TRAIL_1, POP_COUNT, PARITY, REVERSE)
+; Registers: 
+; A(8 high):B(8 low)=D(16 high)
+; E(8 high):F(8 low)=W(16 low)
+; D(16 high):W(16 low)=Q(32)
+; GP(8) X(24, index) Y(24, index)
+
+; Count leading zeros (find position of highest set bit)
+; Input: A = byte to analyze, output: A = number of leading zeros (0-8)
+;         Z flag = 1 if input was zero
+; Example use:
+;   LD A,#$08       ; A = %00001000
+;   JSR LEAD_Z      ; A = 4 (4 leading zeros)
+; Example use:
+;   LD A,#$FF       ; A = %11111111
+;   JSR LEAD_Z      ; A = 0 (no leading zeros)
+LEAD_Z:                 ; 11-26 cycles
+    PUSH B
+    LD B,#0             ; Counter = 0
+    TST A
+    BEQ .ALL_ZERO       ; If A=0, return 8
+.LOOP:
+    TST A               ; N = bit 7 (CMP below would clobber it)
+    BMI .DONE           ; If bit 7 set, done
+    LSL A               ; Shift left
+    INC B               ; Count++
+    CMP B,#8            ; Check if all 8 bits checked
+    BNE .LOOP
+.ALL_ZERO:
+    LD A,#8             ; All zeros
+    BIT A,#0            ; Z = 1 (input was zero)
+    POP B
+    RTS
+.DONE:
+    MOV A,B             ; Return count
+    CMP A,#$FF          ; Z = 0 (input wasn't zero; count is 0-7)
+    POP B
+    RTS
+
+; Count trailing zeros (find position of lowest set bit)
+; Input: A = byte to analyze, output: A = number of trailing zeros (0-8)
+;         Z flag = 1 if input was zero
+; Example use:
+;   LD A,#$08       ; A = %00001000
+;   JSR TRAIL_Z     ; A = 3 (3 trailing zeros)
+; Example use:
+;   LD A,#$01       ; A = %00000001
+;   JSR TRAIL_Z     ; A = 0 (no trailing zeros)
+TRAIL_Z:                ; 11-26 cycles
+    PUSH B
+    LD B,#0             ; Counter = 0
+    TST A
+    BEQ .ALL_ZERO       ; If A=0, return 8
+.LOOP:
+    LSR A               ; Shift right
+    BCS .DONE           ; If carry (bit was 1), done
+    INC B               ; Count++
+    CMP B,#8            ; Check if all 8 bits checked
+    BNE .LOOP
+.ALL_ZERO:
+    LD A,#8             ; All zeros
+    BIT A,#0            ; Z = 1 (input was zero)
+    POP B
+    RTS
+.DONE:
+    MOV A,B             ; Return count
+    CMP A,#$FF          ; Z = 0 (input wasn't zero; count is 0-7)
+    POP B
+    RTS
+
+; Count leading ones (find position of first zero from MSB)
+; Input: A = byte to analyze, output: A = number of leading ones (0-8)
+; Example use:
+;   LD A,#$F8       ; A = %11111000
+;   JSR LEAD_1      ; A = 5 (5 leading ones)
+; Example use:
+;   LD A,#$7F       ; A = %01111111
+;   JSR LEAD_1      ; A = 0 (no leading ones)
+LEAD_1:                 ; 11-26 cycles
+    PUSH B
+    LD B,#0             ; Counter = 0
+    CMP A,#$FF
+    BEQ .ALL_ONE        ; If A=$FF, return 8
+.LOOP:
+    TST A               ; N = bit 7 (CMP below would clobber it)
+    BPL .DONE           ; If bit 7 clear, done
+    LSL A               ; Shift left
+    INC B               ; Count++
+    CMP B,#8            ; Check if all 8 bits checked
+    BNE .LOOP
+.ALL_ONE:
+    LD A,#8             ; All ones
+    POP B
+    RTS
+.DONE:
+    MOV A,B             ; Return count
+    POP B
+    RTS
+
+; Count trailing ones (find position of first zero from LSB)
+; Input: A = byte to analyze, output: A = number of trailing ones (0-8)
+; Example use:
+;   LD A,#$0F       ; A = %00001111
+;   JSR TRAIL_1     ; A = 4 (4 trailing ones)
+; Example use:
+;   LD A,#$FE       ; A = %11111110
+;   JSR TRAIL_1     ; A = 0 (no trailing ones)
+TRAIL_1:                ; 11-26 cycles
+    PUSH B
+    LD B,#0             ; Counter = 0
+    CMP A,#$FF
+    BEQ .ALL_ONE        ; If A=$FF, return 8
+.LOOP:
+    LSR A               ; Shift right
+    BCC .DONE           ; If no carry (bit was 0), done
+    INC B               ; Count++
+    CMP B,#8            ; Check if all 8 bits checked
+    BNE .LOOP
+.ALL_ONE:
+    LD A,#8             ; All ones
+    POP B
+    RTS
+.DONE:
+    MOV A,B             ; Return count
+    POP B
+    RTS
+
+; Population count (count set bits)
+; A & (A-1) clears lowest set bit
+; Input: A = byte to analyze, output: A = number of set bits (0-8)
+; Example use:
+;   LD A,#$A5       ; A = %10100101
+;   JSR POP_COUNT   ; A = 4 (4 bits set)
+; Example use:
+;   LD A,#$FF       ; A = %11111111
+;   JSR POP_COUNT   ; A = 8 (all bits set)
+POP_COUNT:              ; 8-59 cycles
+    PUSH2 B,E
+    LD B,#0             ; Count = 0
+    TST A
+    BEQ .DONE           ; If A=0, count=0
+.LOOP:
+    INC B               ; Count++
+    MOV E,A
+    DEC E               ; E = A - 1
+    AND A,E             ; A = A & (A-1), clears lowest set bit
+    BNE .LOOP           ; Continue if A != 0
+.DONE:
+    MOV A,B             ; Return count
+    POP2 E,B
+    RTS
+
+; Parity (even/odd count of set bits)
+; Input: A = byte to analyze, output: A = 0 (even parity) or 1 (odd parity)
+; Z flag = 1 if even parity
+; Example use:
+;   LD A,#$A5       ; A = %10100101 (4 bits set)
+;   JSR PARITY      ; A = 0, Z = 1 (even parity)
+; Example use:
+;   LD A,#$A7       ; A = %10100111 (5 bits set)
+;   JSR PARITY      ; A = 1, Z = 0 (odd parity)
+PARITY:                 ; 21 cycles
+    PUSH B
+    LD B,A              ; Save original
+    LSR A               ; Shift right
+    XOR A,B             ; XOR with original
+    MOV B,A
+    LSR A,#2            ; Shift right 2
+    XOR A,B             ; XOR
+    MOV B,A
+    LSR A,#4            ; Shift right 4
+    XOR A,B             ; XOR
+    AND A,#1            ; Keep only bit 0
+    POP B
+    RTS
+
+; Reverse bit order
+; Input: A = byte to reverse, output: A = reversed byte
+; Example use:
+;   LD A,#$40       ; A = %01000000
+;   JSR REVERSE     ; A = %00000010 = $02
+; Example use:
+;   LD A,#$C3       ; A = %11000011
+;   JSR REVERSE     ; A = %11000011 = $C3 (palindrome)
+REVERSE:                ; 29 cycles
+    PUSH2 B,E
+    LD B,#0             ; Result = 0
+    LD E,#8             ; Counter = 8
+.LOOP:
+    LSR A               ; Shift A right, bit 0 → carry
+    RCL B               ; Rotate carry into B from left
+    DBNZ E,.LOOP        ; Repeat 8 times
+    MOV A,B             ; A = reversed result
+    POP2 E,B
+    RTS

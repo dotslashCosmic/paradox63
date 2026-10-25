@@ -1,0 +1,67 @@
+; Paradox63 Assembly Math Subroutines
+; Registers:
+; A(8 high):B(8 low)=D(16 high)
+; E(8 high):F(8 low)=W(16 low)
+; D(16 high):W(16 low)=Q(32)
+; GP(8) X(24, index) Y(24, index)
+;
+; Note: D aliases A:B and Q aliases D:W, so writing D changes A and B, and writing
+; Q changes all of D, W, A, B, E and F.
+
+; 32-bit native square root (SQRT)
+; Input: Q = value (0-4294967295), Output: D = sqrt(Q) (rounded down)
+; Trashes: Q, GP
+; Method: classic bit-by-bit integer root; all 32-bit work goes through Q and the
+; memory variables below (ALU instructions take 32-bit memory operands).
+; Example use:
+;   LD Q,#54289 ; sqrt(54289)
+;   JSR SQRT ; D = 233
+;   LD Q,#1807100100 ; sqrt(1807100100)
+;   JSR SQRT ; D = 42510
+SQRT:
+    ST Q,SQ_X               ; x = value (running remainder)
+    CLR Q
+    ST Q,SQ_RES             ; res = 0
+    LD Q,#$40000000         ; bit = 2^30 (top bit-pair)
+    ST Q,SQ_BIT
+    MOV GP,#16              ; 16 bit-pairs
+.LOOP:
+    LD Q,SQ_RES
+    ADD Q,SQ_BIT            ; trial = res + bit
+    ST Q,SQ_T
+    LD Q,SQ_X
+    CMP Q,SQ_T              ; x - trial
+    BCS .SKIP               ; borrow: x < trial
+    SUB Q,SQ_T              ; x -= trial
+    ST Q,SQ_X
+    LD Q,SQ_RES
+    LSR Q,#1
+    ADD Q,SQ_BIT            ; res = (res >> 1) + bit
+    ST Q,SQ_RES
+    BRA .NEXT
+.SKIP:
+    LD Q,SQ_RES
+    LSR Q,#1                ; res = res >> 1
+    ST Q,SQ_RES
+.NEXT:
+    LD Q,SQ_BIT
+    LSR Q,#2                ; bit >>= 2
+    ST Q,SQ_BIT
+    DEC GP
+    BNE .LOOP
+    LD Q,SQ_RES             ; result is at most 65535, so it's all in W
+    MOV D,W                 ; D = result
+    RTS
+
+; Memory variables
+SQ_X:
+    .LONG 0                 ; Running remainder
+
+SQ_RES:
+    .LONG 0                 ; Result accumulator
+
+SQ_BIT:
+    .LONG 0                 ; Current bit position
+
+SQ_T:
+    .LONG 0                 ; Trial value

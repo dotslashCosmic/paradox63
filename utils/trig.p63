@@ -1,0 +1,344 @@
+; Paradox63 Assembly Trigonometry Subroutines
+; 8/16-bit cosine, sin, tangent, and reciprocals (COS, COS16, SIN, SIN16, TAN, TAN16, COSEC, COSEC16, SEC, SEC16, COTAN, COTAN16)
+; Registers:
+; A(8 high):B(8 low)=D(16 high)
+; E(8 high):F(8 low)=W(16 low)
+; D(16 high):W(16 low)=Q(32)
+; GP(8) X(24, index) Y(24, index)
+;
+; Scales: 8-bit results use 110 = 1.0 (clamped to -127..127), 16-bit results use
+; 32767 = 1.0 (clamped to -32767..32767). Angles: 8-bit 0-255 and 16-bit 0-65535
+; both cover one full circle.
+
+; 8-bit cosine
+; Input: A = angle, Output: A = cos(angle)
+; Trashes: X, GP
+; sin(angle + 90*)
+; Example use:
+;   LD A,#0 ; 0 degrees
+;   JSR COS ; A = 110 (cos(0)=1)
+COS:
+    ADD A,#64
+    JMP SIN
+
+; 16-bit cosine
+; Input: D = angle (0-65535 = 0-360*), Output: D = cos(angle) (-32767 to 32767)
+; Trashes: Q, X, GP
+; sin(x + 90*)
+; Example use:
+;   LD D,#0              ; 0 degrees
+;   JSR COS16            ; D = 32767 (cos(0*) = 1.0)
+COS16:
+    ADD D,#16384            ; Add 90* (16384 = 1/4 circle)
+    JMP SIN16
+
+; 8-bit sine
+; Input: A = angle (0-255 = 0-360*), Output: A = sin(angle) (-110 to 110)
+; Trashes: X, GP
+; Example use:
+;   LD A,#64 ; 90 degrees
+;   JSR SIN ; A = 110 (scaled sine)
+SIN:
+    MOV GP,A                ; GP = angle; bit 6 = mirror, bit 7 = negate
+    AND A,#$3F              ; A = angle within the quadrant (0-63)
+    TBZ GP,#6,.NO_MIRROR    ; quadrants 1 and 3 run backwards
+    NEG A
+    ADD A,#64               ; A = 64 - angle
+.NO_MIRROR:
+    MOV X,A                 ; X = table index (0-64)
+    LD A,SINTAB,X           ; A = sin value (0 to 110)
+    TBZ GP,#7,.POSITIVE     ; quadrants 2 and 3 are negative
+    NEG A
+.POSITIVE:
+    RTS
+
+; 16-bit sine
+; Input: D = angle (0-65535 = 0.00*-359.99*), Output: D = sin(angle) (-32767 to 32767)
+; Trashes: Q, X, GP
+; Angle mapping: 0 = 0*, 16384 = 90*, 32768 = 180*, 49152 = 270*, 65535 ≈ 360*
+; Method: 64-step quarter-wave table, linearly interpolated with the low byte.
+; Example use:
+;   LD D,#16384 ; 90 degrees (¼ circle)
+;   JSR SIN16 ; D = 32767 (sin(90*) = 1.0)
+;   LD D,#8192 ; 45 degrees
+;   JSR SIN16 ; D ≈ 23170 (sin(45*) ≈ 0.707)
+SIN16:
+    MOV W,D                 ; W = angle
+    MOV GP,E                ; GP = high byte; bit 6 = mirror, bit 7 = negate
+    AND W,#$3FFF            ; W = angle within the quadrant (0-16383)
+    TBZ GP,#6,.NO_MIRROR    ; quadrants 1 and 3 run backwards
+    NEG W
+    ADD W,#$4000            ; W = 16384 - angle
+.NO_MIRROR:
+    MOV D,W
+    LSR D,#8                ; D = table index (0-64)
+    LSL D,#1                ; D = byte offset (word table)
+    MOV X,D
+    LD D,SINTAB16+2,X       ; D = next entry
+    SUB D,SINTAB16,X        ; D = step to the next entry
+    AND W,#$00FF            ; W = fraction of a step (0-255)
+    MULD D,W                ; Q = step * fraction
+    LSR Q,#8                ; W = step * fraction / 256
+    LD D,SINTAB16,X         ; D = entry
+    ADD D,W                 ; D = interpolated sin value (0 to 32767)
+    TBZ GP,#7,.POSITIVE     ; quadrants 2 and 3 are negative
+    NEG D
+.POSITIVE:
+    RTS
+
+; 8-bit tangent
+; Input: A = angle (0-255 = 0-360*), Output: A = tan(angle) (-127 to 127, clamped)
+; Trashes: D, W, X, GP
+; tan(x) = sin(x) / cos(x)
+; Undefined (cos=0) at 90* and 270* -> returns 127
+; Example use:
+;   LD A,#32 ; 45 degrees
+;   JSR TAN ; A ≈ 110 (tan(45*) = 1.0)
+;   LD A,#16 ; 22.5 degrees
+;   JSR TAN ; A ≈ 45 (tan(22.5*) ≈ 0.414)
+TAN:
+    BSR _TRIG_SINCOS8       ; A = sin, B = cos
+    TST B
+    BEQ .UNDEF
+    JMP _RATIO8             ; A = sin * 110 / cos
+.UNDEF:
+    LD A,#127
+    RTS
+
+; 16-bit tangent
+; Input: D = angle (0-65535), Output: D = tan(angle) (-32767 to 32767, clamped)
+; Trashes: Q, X, Y, GP
+; Undefined (cos=0) at 90* and 270* -> returns $7FFF
+;   LD D,#8192 ; 45 degrees
+;   JSR TAN16 ; D ≈ 32767 (tan(45*) = 1.0)
+;   LD D,#4096 ; 22.5 degrees
+;   JSR TAN16 ; D ≈ 13573 (tan(22.5*) ≈ 0.414)
+TAN16:
+    BSR _TRIG_SINCOS16      ; D = sin, W = cos
+    TST W
+    BEQ .UNDEF
+    JMP _RATIO16            ; D = sin * 32768 / cos
+.UNDEF:
+    LD D,#$7FFF
+    RTS
+
+; 8-bit Cosecant = 1/sin
+; Input: A = angle (0-255 = 0-360*), Output: A = cosec(angle) (-127 to 127, clamped)
+; Trashes: D, W, X, GP
+; Undefined (sin=0) at 0* and 180* -> returns 127
+; Example use:
+;   LD A,#64 ; 90 degrees
+;   JSR COSEC ; A = 110 (cosec(90*) = 1.0 scaled)
+COSEC:
+    JSR SIN                 ; A = sin(angle)
+    TST A
+    BEQ .UNDEF
+    MOV B,A                 ; B = sin (divisor)
+    LD A,#110               ; A = 1.0
+    JMP _RATIO8             ; A = 110 * 110 / sin
+.UNDEF:
+    LD A,#127
+    RTS
+
+; 16-bit Cosecant = 1/sin16
+; Input: D = angle (0-65535 = 0-360*), Output: D = cosec(angle) (-32767 to 32767, clamped)
+; Trashes: Q, X, Y, GP
+; |cosec| >= 1, so the result is always +/-32767 (exactly 1.0 at 90* and 270*).
+; Undefined (sin=0) at 0* and 180* -> returns $7FFF
+; Example use:
+;   LD D,#16384 ; 90 degrees
+;   JSR COSEC16 ; D = 32767 (cosec(90*) = 1.0)
+COSEC16:
+    JSR SIN16               ; D = sin(angle)
+    TST D
+    BEQ .UNDEF
+    MOV W,D                 ; W = sin (divisor)
+    LD D,#$7FFF             ; D = 1.0
+    JMP _RATIO16
+.UNDEF:
+    LD D,#$7FFF
+    RTS
+
+; 8-bit Secant = 1/cos
+; Input: A = angle (0-255 = 0-360*), Output: A = sec(angle) (-127 to 127, clamped)
+; Trashes: D, W, X, GP
+; Undefined (cos=0) at 90* and 270* -> returns 127
+; Example use:
+;   LD A,#0 ; 0 degrees
+;   JSR SEC ; A = 110 (sec(0*) = 1.0 scaled)
+SEC:
+    JSR COS                 ; A = cos(angle)
+    TST A
+    BEQ .UNDEF
+    MOV B,A                 ; B = cos (divisor)
+    LD A,#110               ; A = 1.0
+    JMP _RATIO8             ; A = 110 * 110 / cos
+.UNDEF:
+    LD A,#127
+    RTS
+
+; 16-bit Secant = 1/cos16
+; Input: D = angle (0-65535 = 0-360*), Output: D = sec(angle) (-32767 to 32767, clamped)
+; Trashes: Q, X, Y, GP
+; |sec| >= 1, so the result is always +/-32767 (exactly 1.0 at 0* and 180*).
+; Undefined (cos=0) at 90* and 270* -> returns $7FFF
+; Example use:
+;   LD D,#0 ; 0 degrees
+;   JSR SEC16 ; D = 32767 (sec(0*) = 1.0)
+SEC16:
+    JSR COS16               ; D = cos(angle)
+    TST D
+    BEQ .UNDEF
+    MOV W,D                 ; W = cos (divisor)
+    LD D,#$7FFF             ; D = 1.0
+    JMP _RATIO16
+.UNDEF:
+    LD D,#$7FFF
+    RTS
+
+; 8-bit Cotangent = 1/tan = cos/sin
+; Input: A = angle (0-255 = 0-360*), Output: A = cotan(angle) (-127 to 127, clamped)
+; Trashes: D, W, X, GP
+; Undefined (sin=0) at 0* and 180* -> returns 127
+; Example use:
+;   LD A,#32 ; 45 degrees
+;   JSR COTAN ; A ≈ 110 (cotan(45*) = 1.0 scaled)
+COTAN:
+    BSR _TRIG_SINCOS8       ; A = sin, B = cos
+    TST A
+    BEQ .UNDEF
+    EXG A,B                 ; A = cos, B = sin
+    JMP _RATIO8             ; A = cos * 110 / sin
+.UNDEF:
+    LD A,#127
+    RTS
+
+; 16-bit Cotangent = 1/tan16 = cos16/sin16
+; Input: D = angle (0-65535), Output: D = cotan(angle) (-32767 to 32767, clamped)
+; Trashes: Q, X, Y, GP
+; Undefined (sin=0) at 0* and 180* -> returns $7FFF
+; Example use:
+;   LD D,#8192 ; 45 degrees
+;   JSR COTAN16 ; D ≈ 32767 (cotan(45*) = 1.0)
+COTAN16:
+    BSR _TRIG_SINCOS16      ; D = sin, W = cos
+    TST D
+    BEQ .UNDEF
+    EXG D,W                 ; D = cos, W = sin
+    JMP _RATIO16            ; D = cos * 32768 / sin
+.UNDEF:
+    LD D,#$7FFF
+    RTS
+
+; Internal: A = angle -> A = sin, B = cos. Trashes X, GP.
+_TRIG_SINCOS8:
+    PUSH A                  ; save angle
+    JSR COS                 ; A = cos
+    POP B                   ; B = angle
+    PUSH A                  ; save cos
+    MOV A,B
+    JSR SIN                 ; A = sin
+    POP B                   ; B = cos
+    RTS
+
+; Internal: D = angle -> D = sin, W = cos. Trashes Q, X, GP.
+_TRIG_SINCOS16:
+    PUSH D                  ; save angle
+    JSR COS16               ; D = cos
+    POP W                   ; W = angle
+    PUSH D                  ; save cos
+    MOV D,W
+    JSR SIN16               ; D = sin
+    POP W                   ; W = cos
+    RTS
+
+; Internal: A = a, B = b (signed, b != 0) -> A = a * 110 / b, clamped to -127..127.
+; Trashes D, W, X, GP.
+_RATIO8:
+    CLR GP                  ; GP bit 0 = result sign
+    TST A
+    BPL .A_POS
+    NEG A
+    INC GP
+.A_POS:
+    TST B
+    BPL .B_POS
+    NEG B
+    INC GP
+.B_POS:
+    MOV X,B                 ; X = |b|
+    LD B,#110
+    MUL A,B                 ; D = |a| * 110
+    MOV W,X
+    LSL W,#7                ; W = |b| * 128
+    CMP D,W
+    BCC .CLAMP              ; quotient would be 128 or more
+    MOV E,X                 ; E = |b|
+    DIV D,E                 ; A = |a| * 110 / |b|
+    BRA .SIGN
+.CLAMP:
+    LD A,#127
+.SIGN:
+    TBZ GP,#0,.DONE
+    NEG A
+.DONE:
+    RTS
+
+; Internal: D = a, W = b (signed, b != 0) -> D = a * 32768 / b, clamped to -32767..32767.
+; Trashes Q, X, Y, GP.
+_RATIO16:
+    LD Y,#0                 ; Y bit 0 = result sign
+    TST D
+    BPL .A_POS
+    NEG D
+    INC Y
+.A_POS:
+    TST W
+    BPL .B_POS
+    NEG W
+    INC Y
+.B_POS:
+    CMP D,W
+    BCS .FRACTION           ; |a| < |b|: the ratio is below 1.0
+    LD D,#$7FFF             ; |ratio| >= 1.0
+    BRA .SIGN
+.FRACTION:
+    LD X,#0                 ; X = quotient
+    MOV GP,#15              ; 15 quotient bits
+.LOOP:
+    LSL D                   ; remainder <<= 1
+    LSL X
+    CMP D,W
+    BCS .NEXT               ; remainder < divisor
+    SUB D,W
+    INC X                   ; set this quotient bit
+.NEXT:
+    DEC GP
+    BNE .LOOP
+    MOV D,X                 ; D = |a| * 32768 / |b|
+.SIGN:
+    TBZ Y,#0,.DONE
+    NEG D
+.DONE:
+    RTS
+
+; 8-bit sine table, quarter wave: SINTAB[i] = 110 * sin(i * 90* / 64), i = 0-64
+SINTAB:
+    .BYTE 0,3,5,8,11,13,16,19,21,24,27,29,32,35,37,40
+    .BYTE 42,45,47,49,52,54,57,59,61,63,66,68,70,72,74,76
+    .BYTE 78,80,82,83,85,87,88,90,91,93,94,96,97,98,99,101
+    .BYTE 102,103,104,104,105,106,107,107,108,108,109,109,109,110,110,110
+    .BYTE 110
+
+; 16-bit sine table, quarter wave: SINTAB16[i] = 32767 * sin(i * 90* / 64), i = 0-64,
+; plus one extra entry so interpolation at 90* stays inside the table
+SINTAB16:
+    .WORD 0,804,1608,2410,3212,4011,4808,5602
+    .WORD 6393,7179,7962,8739,9512,10278,11039,11793
+    .WORD 12539,13279,14010,14732,15446,16151,16846,17530
+    .WORD 18204,18868,19519,20159,20787,21403,22005,22594
+    .WORD 23170,23731,24279,24811,25329,25832,26319,26790
+    .WORD 27245,27683,28105,28510,28898,29268,29621,29956
+    .WORD 30273,30571,30852,31113,31356,31580,31785,31971
+    .WORD 32137,32285,32412,32521,32609,32678,32728,32757
+    .WORD 32767,32767
