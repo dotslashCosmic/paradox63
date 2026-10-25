@@ -51,6 +51,23 @@ impl Program {
         self.symbols.get(&name.to_ascii_uppercase()).copied()
     }
 
+    /// One flat image starting at `base`, gaps filled with zeros.
+    /// Fails if any code lies below `base`.
+    pub fn image_at(&self, base: u32) -> Result<Vec<u8>, String> {
+        let mut image = Vec::new();
+        for (addr, bytes) in &self.segments {
+            if *addr < base {
+                return Err(format!("code at ${addr:06X} is below the load address ${base:06X}"));
+            }
+            let at = (addr - base) as usize;
+            if image.len() < at + bytes.len() {
+                image.resize(at + bytes.len(), 0);
+            }
+            image[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+        Ok(image)
+    }
+
     /// Writes every segment into memory.
     pub fn load(&self, bus: &mut impl Bus) {
         for (addr, bytes) in &self.segments {

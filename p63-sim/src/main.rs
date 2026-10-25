@@ -3,6 +3,8 @@
 //! `asm`  assembles a file and reports errors or a summary.
 //! `call` assembles a file, calls one routine with the given registers and
 //!        prints the registers it returns with.
+//! `run`  boots a program or cartridge on the full machine for N frames.
+//! `play` boots it in a window with the keyboard as the gamepad.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -28,6 +30,30 @@ enum Command {
         /// Print the symbol table
         #[arg(short, long)]
         symbols: bool,
+        /// Write a .p63 cartridge (image loaded at $000100) to this file
+        #[arg(short, long)]
+        cart: Option<PathBuf>,
+    },
+    /// Play a program (assembly source or .p63 cartridge) in a window.
+    /// Arrows = D-pad, Enter = Start, Backspace = Select, Z/X = A/B, Esc = quit
+    Play {
+        file: PathBuf,
+    },
+    /// Boot a program (assembly source or .p63 cartridge) and run it
+    Run {
+        file: PathBuf,
+        /// Frames to run (60 per second)
+        #[arg(short, long, default_value_t = 60)]
+        frames: u64,
+        /// Print memory afterwards: ADDR:LEN, e.g. `$10:8` (repeatable)
+        #[arg(long)]
+        peek: Vec<String>,
+        /// Gamepad buttons held the whole run: A B START SELECT UP DOWN LEFT RIGHT
+        #[arg(long)]
+        hold: Vec<String>,
+        /// Save the last frame as a .bmp
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
     },
     /// Call routines: `call utils/bitops.p63 POP_COUNT A=$A5`.
     /// Several in a row share state: `call utils/prng.p63 RAND_SEED8,RAND8 A=$42`
@@ -45,7 +71,9 @@ enum Command {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Command::Asm { file, output, symbols } => asm(&file, output.as_deref(), symbols),
+        Command::Asm { file, output, symbols, cart } => asm(&file, output.as_deref(), symbols, cart.as_deref()),
+        Command::Play { file } => play(&file),
+        Command::Run { file, frames, peek, hold, screenshot } => run(&file, frames, &peek, &hold, screenshot.as_deref()),
         Command::Call { file, routine, regs, max_steps } => call(&file, &routine, &regs, max_steps),
     };
     match result {
@@ -61,7 +89,7 @@ fn errors_to_string(errors: &[p63_asm::AsmError]) -> String {
     errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
 }
 
-fn asm(file: &Path, output: Option<&Path>, symbols: bool) -> Result<(), String> {
+fn asm(file: &Path, output: Option<&Path>, symbols: bool, cart: Option<&Path>) -> Result<(), String> {
     let program = p63_asm::assemble_file(file).map_err(|e| errors_to_string(&e))?;
     for (addr, bytes) in &program.segments {
         println!("${addr:06X}: {} bytes", bytes.len());
@@ -81,6 +109,124 @@ fn asm(file: &Path, output: Option<&Path>, symbols: bool) -> Result<(), String> 
         }
         std::fs::write(out, &image).map_err(|e| format!("{}: {e}", out.display()))?;
         println!("wrote {} bytes from ${start:06X} to {}", image.len(), out.display());
+    }
+    if let Some(out) = cart {
+        let data = make_cart(&program, file)?;
+        std::fs::write(out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
+        println!("wrote cartridge {} ({} bytes)", out.display(), data.len());
+    }
+    Ok(())
+}
+
+/// Packs an assembled program as a cartridge titled after the file name.
+fn make_cart(program: &p63_asm::Program, file: &Path) -> Result<Vec<u8>, String> {
+    let image = program.image_at(p63_spec::FIXED_ENTRY)?;
+    let title = file.file_stem().map(|s| s.to_string_lossy().to_ascii_uppercase()).unwrap_or_default();
+    let opts = p63_cart::PackOptions { title, ..Default::default() };
+    p63_cart::pack(&image, &opts).map_err(|e| e.to_string())
+}
+
+/// Boots a cartridge, or assembles and packs a source file first, then runs frames.
+fn button(name: &str) -> Result<u8, String> {
+    Ok(match name.to_ascii_uppercase().as_str() {
+        "A" => 0x80,
+        "B" => 0x40,
+        "START" => 0x20,
+        "SELECT" => 0x10,
+        "UP" => 0x08,
+        "DOWN" => 0x04,
+        "LEFT" => 0x02,
+        "RIGHT" => 0x01,
+        other => return Err(format!("unknown button `{other}`")),
+    })
+}
+
+/// Writes a 24-bit bottom-up BMP.
+fn save_bmp(path: &Path, pixels: &[u32], width: usize, height: usize) -> Result<(), String> {
+    let row = (width * 3).div_ceil(4) * 4;
+    let size = 54 + row * height;
+    let mut out = Vec::with_capacity(size);
+    out.extend(b"BM");
+    for v in [size as u32, 0, 54, 40, width as u32, height as u32] {
+        out.extend(v.to_le_bytes());
+    }
+    out.extend(1u16.to_le_bytes());
+    out.extend(24u16.to_le_bytes());
+    out.extend([0u8; 24]);
+    for y in (0..height).rev() {
+        let start = out.len();
+        for &p in &pixels[y * width..(y + 1) * width] {
+            out.extend([p as u8, (p >> 8) as u8, (p >> 16) as u8]);
+        }
+        out.resize(start + row, 0);
+    }
+    std::fs::write(path, out).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reads a cartridge, or assembles and packs a source file, and boots it.
+fn boot(file: &Path) -> Result<(p63_bus::Machine, p63_cart::Cart), String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let cart = if bytes.starts_with(p63_cart::MAGIC) {
+        bytes
+    } else {
+        let program = p63_asm::assemble_file(file).map_err(|e| errors_to_string(&e))?;
+        make_cart(&program, file)?
+    };
+    let mut machine = p63_bus::Machine::new();
+    let info = machine.boot(cart).map_err(|e| e.to_string())?;
+    Ok((machine, info))
+}
+
+fn play(file: &Path) -> Result<(), String> {
+    use minifb::{Key, Scale, Window, WindowOptions};
+    let keys = [
+        (Key::Up, 0x08),
+        (Key::Down, 0x04),
+        (Key::Left, 0x02),
+        (Key::Right, 0x01),
+        (Key::Enter, 0x20),
+        (Key::Backspace, 0x10),
+        (Key::Z, 0x80),
+        (Key::X, 0x40),
+    ];
+    let (mut machine, info) = boot(file)?;
+    let (w, h) = (p63_ppu::WIDTH, p63_ppu::HEIGHT);
+    let options = WindowOptions { scale: Scale::X2, resize: true, ..WindowOptions::default() };
+    let mut window = Window::new(&format!("Paradox63 - {}", info.title), w, h, options).map_err(|e| e.to_string())?;
+    window.set_target_fps(60);
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        machine.cpu.bus.keyboard.pad[0] = keys.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
+        machine.run_frame().map_err(|e| format!("frame {}, at ${:06X}: {e}", machine.frames, machine.cpu.registers.pc()))?;
+        window.update_with_buffer(&machine.frame, w, h).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn run(file: &Path, frames: u64, peek: &[String], hold: &[String], screenshot: Option<&Path>) -> Result<(), String> {
+    let (mut machine, info) = boot(file)?;
+    println!("booted {:?} ({} byte image)", info.title, info.image().len());
+    for name in hold {
+        machine.cpu.bus.keyboard.pad[0] |= button(name)?;
+    }
+    for frame in 0..frames {
+        if let Err(e) = machine.run_frame() {
+            print_registers(&machine.cpu, 0);
+            return Err(format!("frame {frame}, at ${:06X}: {e}", machine.cpu.registers.pc()));
+        }
+    }
+    println!("ran {frames} frames");
+    let r = &machine.cpu.registers;
+    println!("PC=${:06X} SP=${:06X} halt={:?}", r.pc(), r.sp(), machine.cpu.halt());
+    if let Some(path) = screenshot {
+        save_bmp(path, &machine.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT)?;
+        println!("saved {}", path.display());
+    }
+    for spec in peek {
+        let (addr, len) = spec.split_once(':').ok_or(format!("--peek wants ADDR:LEN, got `{spec}`"))?;
+        let (addr, len) = (parse_value(addr)?, parse_value(len)?);
+        let bytes: Vec<String> =
+            (0..len).map(|i| format!("{:02X}", p63_core::Bus::read(&mut machine.cpu.bus, p63_core::Addr::new(addr + i)))).collect();
+        println!("${addr:06X}: {}", bytes.join(" "));
     }
     Ok(())
 }
@@ -176,7 +322,7 @@ fn call(file: &Path, routine: &str, regs: &[String], max_steps: u64) -> Result<(
     Err(format!("{routine} didn't return within {max_steps} instructions"))
 }
 
-fn print_registers(cpu: &ReferenceInterpreter<Ram>, cycles: u64) {
+fn print_registers<B: p63_core::Bus>(cpu: &ReferenceInterpreter<B>, cycles: u64) {
     let r = &cpu.registers;
     let cc = r.cc();
     let flags: String = [

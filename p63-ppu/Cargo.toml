@@ -1,0 +1,8 @@
+[package]
+name = "p63-ppu"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+p63-spec = { path = "../p63-spec" }
