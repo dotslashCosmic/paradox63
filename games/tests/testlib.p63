@@ -1,0 +1,229 @@
+; testlib.p63 - shared harness for the P63 test ROMs
+; Needs: INCLUDE "p63_hw.inc" before this file, and font.p63 somewhere after it
+;
+; A test ROM calls T_INIT with X = its name, then for each case:
+;   JSR T_CASE                  ; next case number
+;   ...set up, run the instruction under test...
+;   PUSH CC                     ; catch the flags before anything else touches them
+;   (move the result into A, or D for 16 bits)
+;   LD B,#want / LD W,#want
+;   JSR T_CHECK8 / T_CHECK16    ; stops the ROM if the value is wrong
+;   POP A                       ; the caught flags
+;   LD B,#want
+;   LD E,#mask                  ; only the flags the instruction defines
+;   JSR T_FLAGS
+; and finally JMP T_PASS.
+;
+; Results, for p63-sim test and anyone peeking at memory:
+;   T_STATUS  $00F000  0 running, 1 passed, 2 failed
+;   T_KIND    $00F001  on failure: 1 value, 2 flags
+;   T_NUM     $00F002  word: cases run, or the failing case
+;   T_GOT     $00F004  word: what the failing case got
+;   T_WANT    $00F006  word: what it should have got
+; On screen: green PASS with the case count, or red FAIL with case, got and want
+
+T_STATUS    EQU $00F000
+T_KIND      EQU $00F001
+T_NUM       EQU $00F002
+T_GOT       EQU $00F004
+T_WANT      EQU $00F006
+
+T_RUNNING   EQU 0
+T_PASSED    EQU 1
+T_FAILED    EQU 2
+
+FL_C        EQU $01                 ; CC bits
+FL_V        EQU $02
+FL_Z        EQU $04
+FL_N        EQU $08
+FL_H        EQU $20
+M_NZ        EQU FL_N|FL_Z           ; masks: which flags an instruction defines
+M_NZV       EQU FL_N|FL_Z|FL_V
+M_NZVC      EQU FL_N|FL_Z|FL_V|FL_C
+M_HNZVC     EQU FL_H|FL_N|FL_Z|FL_V|FL_C
+
+T_ATTR      EQU 1<<3                ; BG0 palette 1
+T_ROW_NAME  EQU 3                   ; screen rows for each line of text
+T_ROW_STATE EQU 6
+T_ROW_CASE  EQU 8
+T_ROW_GOT   EQU 9
+T_ROW_WANT  EQU 10
+T_COL       EQU 4
+
+; Set up the screen and the result block; X = the ROM's name (zero-terminated)
+T_INIT:
+    CLR A
+    ST A,T_STATUS
+    ST A,T_KIND
+    CLR D
+    ST D,T_NUM
+    ST D,T_GOT
+    ST D,T_WANT
+    PUSH X
+    LD X,#T_FONT                    ; font at tile 32, so tile = ASCII code
+    LD Y,#VRAM_PATTERN+32*32
+    MOVB [X],[Y],#T_FONT_END-T_FONT
+    LD A,#$25                       ; backdrop: charcoal while running
+    ST A,VRAM_PALETTE
+    LD A,#$FF                       ; text: white
+    ST A,VRAM_PALETTE+16+1
+    POP X
+    LD Y,#VRAM_BG0+(T_ROW_NAME*40+T_COL)*2
+    JSR T_PUTS
+    LD X,#T_S_RUNNING
+    LD Y,#VRAM_BG0+(T_ROW_STATE*40+T_COL)*2
+    JSR T_PUTS
+    LD A,#$09                       ; picture and BG0 on
+    ST A,V_CTRL
+    RTS
+
+; Next case
+T_CASE:
+    LD D,T_NUM
+    ADD D,#1
+    ST D,T_NUM
+    RTS
+
+; Value check: A = got, B = want
+T_CHECK8:
+    CMP A,B
+    BNE .FAIL
+    RTS
+.FAIL:
+    ST A,T_GOT
+    ST B,T_WANT
+    CLR A
+    ST A,T_GOT+1
+    ST A,T_WANT+1
+    LD A,#1
+    ST A,T_KIND
+    JMP T_FAIL
+
+; Value check: D = got, W = want
+T_CHECK16:
+    CMP D,W
+    BNE .FAIL
+    RTS
+.FAIL:
+    ST D,T_GOT
+    ST W,T_WANT
+    LD A,#1
+    ST A,T_KIND
+    JMP T_FAIL
+
+; Flag check: A = caught CC, B = want, E = mask of the flags to compare
+T_FLAGS:
+    AND A,E
+    CMP A,B
+    BNE .FAIL
+    RTS
+.FAIL:
+    ST A,T_GOT
+    ST B,T_WANT
+    CLR A
+    ST A,T_GOT+1
+    ST A,T_WANT+1
+    LD A,#2
+    ST A,T_KIND
+    JMP T_FAIL
+
+; All cases passed: green screen, PASS and the count
+T_PASS:
+    LD A,#T_PASSED
+    ST A,T_STATUS
+    LD A,#$14                       ; backdrop: green
+    ST A,VRAM_PALETTE
+    LD X,#T_S_PASS
+    LD Y,#VRAM_BG0+(T_ROW_STATE*40+T_COL)*2
+    JSR T_PUTS
+    LD D,T_NUM
+    JSR T_HEX16
+    LD X,#T_S_CASES
+    JSR T_PUTS
+    BRA T_HALT
+
+; A case failed: red screen, which case, got and want
+T_FAIL:
+    LD A,#T_FAILED
+    ST A,T_STATUS
+    LD A,#$A0                       ; backdrop: dark red
+    ST A,VRAM_PALETTE
+    LD X,#T_S_FAIL
+    LD A,T_KIND
+    CMP A,#2
+    BNE .KIND
+    LD X,#T_S_FAIL_FLAGS
+.KIND:
+    LD Y,#VRAM_BG0+(T_ROW_STATE*40+T_COL)*2
+    JSR T_PUTS
+    LD X,#T_S_CASE
+    LD Y,#VRAM_BG0+(T_ROW_CASE*40+T_COL)*2
+    JSR T_PUTS
+    LD D,T_NUM
+    JSR T_HEX16
+    LD X,#T_S_GOT
+    LD Y,#VRAM_BG0+(T_ROW_GOT*40+T_COL)*2
+    JSR T_PUTS
+    LD D,T_GOT
+    JSR T_HEX16
+    LD X,#T_S_WANT
+    LD Y,#VRAM_BG0+(T_ROW_WANT*40+T_COL)*2
+    JSR T_PUTS
+    LD D,T_WANT
+    JSR T_HEX16
+T_HALT:
+    WAITV
+    BRA T_HALT
+
+; Print the zero-terminated string at X to the BG0 cell at Y; Y ends just after it
+T_PUTS:
+    LD A,0,X
+    TST A
+    BEQ .DONE
+    ST A,0,Y
+    LD A,#T_ATTR
+    ST A,1,Y
+    LEA X,1,X
+    LEA Y,2,Y
+    BRA T_PUTS
+.DONE:
+    RTS
+
+; Print D as 4 hex digits at Y
+T_HEX16:
+    ST D,T_HEXTMP
+    LD A,T_HEXTMP+1                 ; high byte first
+    JSR T_HEX8
+    LD A,T_HEXTMP
+    BRA T_HEX8
+
+; Print A as 2 hex digits at Y
+T_HEX8:
+    ST A,T_HEXTMP+2
+    LSR A,#4
+    JSR T_DIGIT
+    LD A,T_HEXTMP+2
+    AND A,#$0F
+T_DIGIT:
+    CMP A,#10
+    BLO .NUM
+    ADD A,#$37                      ; 10-15 to 'A'-'F'
+    BRA .PUT
+.NUM:
+    ADD A,#$30                      ; 0-9 to '0'-'9'
+.PUT:
+    ST A,0,Y
+    LD A,#T_ATTR
+    ST A,1,Y
+    LEA Y,2,Y
+    RTS
+
+T_HEXTMP:       .BYTE 0, 0, 0
+T_S_RUNNING:    .BYTE "RUNNING", 0
+T_S_PASS:       .BYTE "PASS  $", 0
+T_S_CASES:      .BYTE " CASES", 0
+T_S_FAIL:       .BYTE "FAIL: VALUE", 0
+T_S_FAIL_FLAGS: .BYTE "FAIL: FLAGS (HNZVC)", 0
+T_S_CASE:       .BYTE "CASE $", 0
+T_S_GOT:        .BYTE "GOT  $", 0
+T_S_WANT:       .BYTE "WANT $", 0

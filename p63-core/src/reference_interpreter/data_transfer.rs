@@ -647,12 +647,21 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 self.bus.write(Addr::new(sp + 2), (value >> 16) as u8);
                 Ok(Cycles(3))
             }
+            0xC | 0xD => {
+                // Push DP or CC (8-bit, 1 byte), as PUSH2 already allows
+                let value = self.read_register(reg)? as u8;
+                let sp = self.registers.sp() - 1;
+                self.registers.set_sp(sp);
+                self.bus.write(Addr::new(sp), value);
+                Ok(Cycles(2))
+            }
             _ => Err(CpuError::IllegalOpcode(crate::Opcode::new(0x56))),
         }
     }
 
     /// POP reg — Pop from stack to register (opcode 0x58, 2-3 cycles)
     /// Postbyte encodes which register to pop to
+    #[allow(clippy::too_many_lines)] // one arm per register
     pub(super) fn exec_pop(&mut self, postbyte: u8) -> Result<Cycles, CpuError> {
         let reg = postbyte & 0x0F;
 
@@ -761,6 +770,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
                 let value = u32::from(byte0) | (u32::from(byte1) << 8) | (u32::from(byte2) << 16);
                 self.registers.set_sp(value);
                 Ok(Cycles(3))
+            }
+            0xC | 0xD => {
+                // Pop DP or CC (8-bit, 1 byte), as POP2 already allows
+                let sp = self.registers.sp();
+                let value = self.bus.read(Addr::new(sp));
+                self.registers.set_sp(sp + 1);
+                self.write_register(reg, u32::from(value))?;
+                Ok(Cycles(2))
             }
             _ => Err(CpuError::IllegalOpcode(crate::Opcode::new(0x58))),
         }
@@ -1370,6 +1387,29 @@ mod tests {
         assert_eq!(result.unwrap(), Cycles(2));
         assert_eq!(interp.registers.sp(), 0x1000); // SP restored
         assert_eq!(interp.registers.a(), 0x42); // A restored
+    }
+
+    #[test]
+    fn test_push_pop_cc_and_dp() {
+        let mut interp = ReferenceInterpreter::new(Ram::new(1024));
+        interp.registers.set_sp(0x1000);
+        interp.registers.set_cc(Flags::N | Flags::C);
+        interp.registers.set_dp(0x12);
+
+        assert_eq!(interp.exec_push(0x0D).unwrap(), Cycles(2)); // PUSH CC
+        assert_eq!(interp.exec_push(0x0C).unwrap(), Cycles(2)); // PUSH DP
+        assert_eq!(interp.registers.sp(), 0x0FFE);
+        assert_eq!(interp.bus.read(Addr::new(0x0FFF)), (Flags::N | Flags::C).bits());
+        assert_eq!(interp.bus.read(Addr::new(0x0FFE)), 0x12);
+
+        interp.registers.set_cc(Flags::Z);
+        interp.registers.set_dp(0);
+        assert_eq!(interp.exec_pop(0x0C).unwrap(), Cycles(2)); // POP DP
+        assert_eq!(interp.exec_pop(0x0D).unwrap(), Cycles(2)); // POP CC
+        assert_eq!(interp.registers.dp(), 0x12);
+        assert_eq!(interp.registers.cc(), Flags::N | Flags::C);
+        assert_eq!(interp.registers.sp(), 0x1000);
+        assert!(interp.exec_push(0x0B).is_err(), "PUSH PC stays illegal");
     }
 
     #[test]

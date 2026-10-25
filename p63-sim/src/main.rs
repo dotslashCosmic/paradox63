@@ -5,6 +5,7 @@
 //!        prints the registers it returns with.
 //! `run`  boots a program or cartridge on the full machine for N frames.
 //! `play` boots it in a window with the keyboard as the gamepad, with sound.
+//! `test` runs test ROMs (built on games/tests/testlib.p63) and reports pass or fail.
 
 mod audio;
 
@@ -75,6 +76,13 @@ enum Command {
         #[arg(long, default_value_t = 10_000_000)]
         max_steps: u64,
     },
+    /// Run test ROMs and report pass or fail; exits with failure if any fail
+    Test {
+        files: Vec<PathBuf>,
+        /// Give each ROM this many frames to finish
+        #[arg(long, default_value_t = 600)]
+        frames: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -85,6 +93,7 @@ fn main() -> ExitCode {
             run(&file, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
         }
         Command::Call { file, routine, regs, max_steps } => call(&file, &routine, &regs, max_steps),
+        Command::Test { files, frames } => test(&files, frames),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -92,6 +101,48 @@ fn main() -> ExitCode {
             eprintln!("{message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Where test ROMs leave their result (see games/tests/testlib.p63): status, kind, case, got, want.
+const TEST_RESULT: u32 = 0x00F000;
+
+fn test(files: &[PathBuf], frames: u64) -> Result<(), String> {
+    use p63_core::{Addr, Bus};
+    let mut failed = 0;
+    for file in files {
+        let name = file.display();
+        let (mut machine, _) = boot(file)?;
+        let mut status = 0;
+        for _ in 0..frames {
+            machine.run_frame().map_err(|e| format!("{name}: at ${:06X}: {e}", machine.cpu.registers.pc()))?;
+            status = machine.cpu.bus.read(Addr::new(TEST_RESULT));
+            if status != 0 {
+                break;
+            }
+        }
+        let mut word = |at: u32| {
+            u16::from(machine.cpu.bus.read(Addr::new(TEST_RESULT + at)))
+                | u16::from(machine.cpu.bus.read(Addr::new(TEST_RESULT + at + 1))) << 8
+        };
+        let (num, got, want) = (word(2), word(4), word(6));
+        match status {
+            1 => println!("PASS  {name} ({num} cases)"),
+            2 => {
+                let kind = if machine.cpu.bus.read(Addr::new(TEST_RESULT + 1)) == 2 { "flags" } else { "value" };
+                println!("FAIL  {name}: case {num}, {kind} ${got:04X}, want ${want:04X}");
+                failed += 1;
+            }
+            _ => {
+                println!("FAIL  {name}: no result after {frames} frames (stopped in case {num})");
+                failed += 1;
+            }
+        }
+    }
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} of {} failed", files.len()))
     }
 }
 
