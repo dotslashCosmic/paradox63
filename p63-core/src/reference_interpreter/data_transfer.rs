@@ -66,6 +66,14 @@ impl<B: Bus> ReferenceInterpreter<B> {
     }
 
     /// Update N and Z flags based on a 32-bit result
+    fn update_nz_24(&mut self, result: u32) {
+        let result = result & 0x00FF_FFFF;
+        let mut flags = self.registers.cc();
+        flags.set(Flags::N, result & 0x0080_0000 != 0);
+        flags.set(Flags::Z, result == 0);
+        self.registers.set_cc(flags);
+    }
+
     fn update_nz_32(&mut self, result: u32) {
         let mut flags = self.registers.cc();
         flags.set(Flags::N, result & 0x8000_0000 != 0);
@@ -206,19 +214,24 @@ impl<B: Bus> ReferenceInterpreter<B> {
             },
             0x8 => {
                 self.registers.set_x(value);
+                self.update_nz_24(value);
             },
             0x9 => {
                 self.registers.set_y(value);
+                self.update_nz_24(value);
             },
             0xA => {
                 self.registers.set_sp(value);
+                self.update_nz_24(value);
             },
             0xB => {
+                // a jump, so the flags stay
                 self.registers.set_pc(value);
             },
             0xC => {
                 let val = value as u8;
                 self.registers.set_dp(val);
+                self.update_nz_8(val);
             },
             0xD => {
                 let val = Flags::from_bits_truncate(value as u8);
@@ -1512,6 +1525,21 @@ mod tests {
         let result = interp.exec_mov(postbyte);
         assert!(result.is_ok());
         assert_eq!(interp.registers.a(), 0xCD); // LSB only
+    }
+
+    #[test]
+    fn test_mov_to_pointer_and_dp_sets_nz() {
+        let mut interp = ReferenceInterpreter::new(Ram::new(1024));
+        interp.registers.set_d(0);
+        interp.exec_mov(0x28).unwrap(); // MOV X,D
+        assert!(interp.registers.cc().contains(Flags::Z));
+        interp.registers.set_q(0x0080_0000);
+        interp.exec_mov(0x69).unwrap(); // MOV Y,Q: bit 23 is the sign
+        assert!(interp.registers.cc().contains(Flags::N));
+        assert!(!interp.registers.cc().contains(Flags::Z));
+        interp.registers.set_a(0x80);
+        interp.exec_mov(0x0C).unwrap(); // MOV DP,A
+        assert!(interp.registers.cc().contains(Flags::N));
     }
 
     #[test]

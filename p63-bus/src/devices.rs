@@ -10,19 +10,23 @@ pub trait Device {
 
 const VBLANK: u8 = 0x01;
 const RASTER: u8 = 0x02;
+const STAT_HBLANK: u8 = 0x02;
+const STAT_OVERFLOW: u8 = 0x04;
 
-/// Video registers. The frame loop drives `line`, `stat` and `irqst`.
+/// Video registers. The frame loop drives `line`, `dot`, `stat` and `irqst`.
 #[derive(Debug, Clone)]
 pub struct Video {
     regs: [u8; 64],
     pub line: u16,
+    /// Cycles into the current line; HBlank is dots 320-454.
+    pub dot: u32,
     pub stat: u8,
     pub irqst: u8,
 }
 
 impl Default for Video {
     fn default() -> Self {
-        Self { regs: [0; 64], line: 0, stat: 0, irqst: 0 }
+        Self { regs: [0; 64], line: 0, dot: 0, stat: 0, irqst: 0 }
     }
 }
 
@@ -48,6 +52,7 @@ impl Video {
         self.line = line;
         if line == spec::SCREEN_H as u16 {
             self.stat |= VBLANK;
+            self.stat &= !STAT_OVERFLOW;
             self.irqst |= VBLANK;
         } else if line == 0 {
             self.stat &= !VBLANK;
@@ -62,7 +67,7 @@ impl Device for Video {
     fn read(&mut self, off: u32) -> u8 {
         match off + spec::VIDEO_IO_BASE {
             spec::V_LINE => self.line.min(255) as u8,
-            spec::V_STAT => self.stat,
+            spec::V_STAT => self.stat | if self.dot >= spec::SCREEN_W { STAT_HBLANK } else { 0 },
             spec::V_IRQST => self.irqst,
             _ => self.regs[off as usize],
         }

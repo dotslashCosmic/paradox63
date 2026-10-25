@@ -1,0 +1,799 @@
+; t_sys.p63 - system checks: memory map, interrupts, timing and audio
+
+SYS_TESTS:
+    JSR SYS_MEMMAP
+    JSR SYS_INTERRUPTS
+    JSR SYS_TIMING
+    JSR SYS_AUDIO
+    RTS
+
+; Waits W x 2 cycles plus a few (DBNZ is 2 cycles)
+DELAY:
+    DBNZ W,DELAY
+    RTS
+
+; Points the 3-byte vector at X to the handler at Y
+SET_VECTOR:
+    MOV Q,Y
+    ST W,0,X
+    ST B,2,X
+    RTS
+
+; the memory map: ROM, RAM and I/O where they belong
+SYS_MEMMAP:
+    JSR T_SECT
+    .BYTE "MEMORY MAP", 0
+    LD A,$000000                    ; low-vector ROM: FIRQ high byte $00
+    JSR T_V8
+    .BYTE $00
+    LD Q,$000000                    ; then the RESET vector: $FBB600, the boot ROM
+    ST Q,SDIFF
+    LD A,SDIFF+1
+    JSR T_V8
+    .BYTE $00
+    LD A,SDIFF+2
+    JSR T_V8
+    .BYTE $B6
+    LD A,SDIFF+3
+    JSR T_V8
+    .BYTE $FB
+    LD A,#$AA                       ; the ROM ignores writes
+    ST A,$000002
+    LD A,$000002
+    JSR T_V8
+    .BYTE $B6
+    LD A,$000004                    ; $000004 is RAM
+    MOV GP,A
+    LD A,#$C7
+    ST A,$000004
+    LD A,$000004
+    MOV B,GP
+    ST B,$000004
+    JSR T_V8
+    .BYTE $C7
+    LD A,#$3C                       ; the top of main RAM, $FBB5FF
+    ST A,MAIN_TOP
+    LD A,MAIN_TOP
+    JSR T_V8
+    .BYTE $3C
+    LD A,BOOT_ROM                   ; the boot ROM ignores writes
+    MOV GP,A
+    COM A
+    ST A,BOOT_ROM
+    LD A,BOOT_ROM
+    MOV B,GP
+    CMP A,B
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, FL_Z
+    LD Q,CART_WIN                   ; the cart window starts with the header magic
+    JSR T_V32
+    .LONG 'P'|'6'<<8|'3'<<16|'C'<<24
+    LD A,CART_WIN+64                ; and the image follows the 64-byte header: our first byte
+    LD B,FIXED_ENTRY
+    CMP A,B
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, FL_Z
+    LD A,#'X'                       ; the cart window ignores writes
+    ST A,CART_WIN
+    LD A,CART_WIN
+    JSR T_V8
+    .BYTE 'P'
+    LD A,CART_STAT                  ; CART_STAT bit 0: a cartridge is in
+    JSR T_V8
+    .BYTE $01
+    LD A,#1                         ; CART_BANK reads back
+    ST A,CART_BANK
+    LD A,CART_BANK
+    CLR B
+    ST B,CART_BANK
+    JSR T_V8
+    .BYTE 1
+    LD A,$FFFE00                    ; reserved I/O reads $FF
+    JSR T_V8
+    .BYTE $FF
+    LD A,$FFFEEF
+    JSR T_V8
+    .BYTE $FF
+    LD A,#$5A                       ; Audio RAM, OAM, VRAM and the vectors are RAM
+    ST A,ARAM_END
+    LD A,ARAM_END
+    JSR T_V8
+    .BYTE $5A
+    LD A,#$6B
+    ST A,OAM_END
+    LD A,OAM_END
+    JSR T_V8
+    .BYTE $6B
+    LD A,#$7C
+    ST A,VRAM_END
+    LD A,VRAM_END
+    JSR T_V8
+    .BYTE $7C
+    LD A,#$8D
+    ST A,$FFFFE0
+    LD A,$FFFFE0
+    JSR T_V8
+    .BYTE $8D
+    WAITV                           ; V_LINE is read-only: writing it changes nothing
+    LD A,#$55
+    ST A,V_LINE
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 240
+    LD A,KB_PAD                     ; no buttons held (headless run)
+    JSR T_V8
+    .BYTE 0
+    RTS
+
+; interrupts: frames, masks, vectors and the video sources
+SYS_INTERRUPTS:
+    JSR T_SECT
+    .BYTE "INTERRUPTS", 0
+    LD X,#VEC_SWI
+    LD Y,#H_FULL
+    JSR SET_VECTOR
+    LD X,#VEC_NMI
+    LD Y,#H_FULL
+    JSR SET_VECTOR
+    LD X,#VEC_FIRQ
+    LD Y,#H_LEAN
+    JSR SET_VECTOR
+    LD X,#VEC_IRQ
+    LD Y,#H_IRQ
+    JSR SET_VECTOR
+
+    ; SWI: full frame, every register back after RTI
+    LD A,#$40                       ; F set, I clear (no IRQ source is enabled)
+    MOV CC,A
+    MOV Q,SP
+    ST Q,SP0
+    LD A,#$5A
+    MOV DP,A
+    MOV GP,#$77
+    LD X,#$123456
+    LD Y,#$654321
+    LD Q,#$11223344
+    SWI
+RET_SWI:
+    PUSH CC
+    JSR SAVE_REGS
+    CLR A
+    MOV DP,A
+    JSR T_FL                        ; RTI brings back CC as saved: E set, I clear, F set
+    .BYTE FL_E|FL_F, FL_E|FL_F|FL_I
+    LD A,#$50
+    MOV CC,A
+    JSR CHECK_REGS
+    LD Q,SP0                        ; the handler saw SP 19 lower
+    SUB Q,ISR_SP
+    JSR T_V32
+    .LONG 19
+    LD A,ISR_CC                     ; inside the handler: E and I set
+    AND A,#FL_E|FL_I
+    JSR T_V8
+    .BYTE FL_E|FL_I
+    JSR CHECK_FRAME
+    LD Q,ISR_FRAME+16               ; return address: the instruction after SWI
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG RET_SWI
+
+    ; NMI as an instruction: the same full frame
+    MOV Q,SP
+    ST Q,SP0
+    LD A,#$5A
+    MOV DP,A
+    MOV GP,#$77
+    LD X,#$123456
+    LD Y,#$654321
+    LD Q,#$11223344
+    NMI
+RET_NMI:
+    JSR SAVE_REGS
+    CLR A
+    MOV DP,A
+    LD A,#$50
+    MOV CC,A
+    JSR CHECK_REGS
+    LD Q,SP0
+    SUB Q,ISR_SP
+    JSR T_V32
+    .LONG 19
+    JSR CHECK_FRAME
+    LD Q,ISR_FRAME+16
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG RET_NMI
+
+    ; FIRQ as an instruction: lean frame of PC and CC; registers are not restored
+    MOV Q,SP
+    ST Q,SP0
+    LD A,#$33
+    FIRQ
+RET_FIRQ:
+    ST A,ISR_A
+    LD A,#$50
+    MOV CC,A
+    LD Q,SP0                        ; 4 bytes
+    SUB Q,ISR_SP
+    JSR T_V32
+    .LONG 4
+    LD A,ISR_CC                     ; inside: F and I set, E clear
+    AND A,#FL_E|FL_F|FL_I
+    JSR T_V8
+    .BYTE FL_F|FL_I
+    LD A,ISR_FRAME                  ; the stacked CC has E clear
+    AND A,#FL_E
+    JSR T_V8
+    .BYTE 0
+    LD Q,ISR_FRAME+1                ; then the return address
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG RET_FIRQ
+    LD A,ISR_A                      ; A kept the handler's value
+    JSR T_V8
+    .BYTE $99
+
+    ; VBlank IRQ: taken out of WAIT at line 240
+    JSR IRQ_RESET
+    LD A,#$01
+    ST A,V_IRQEN
+    CLI
+    WAIT
+    SEI
+    CLR A
+    ST A,V_IRQEN
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 1
+    LD A,ISR_LINE
+    JSR T_V8
+    .BYTE 240
+    LD A,ISR_ST
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+
+    ; raster IRQ at line 100
+    JSR IRQ_RESET
+    LD A,#100
+    ST A,V_IRQLINE
+    LD A,#$02
+    ST A,V_IRQEN
+    CLI
+    WAIT
+    SEI
+    CLR A
+    ST A,V_IRQEN
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 1
+    LD A,ISR_LINE
+    JSR T_V8
+    .BYTE 100
+    LD A,ISR_ST
+    AND A,#$02
+    JSR T_V8
+    .BYTE $02
+
+    ; V_IRQST is set even with the IRQ off, and a 1 clears it
+    JSR IRQ_RESET
+    WAITV
+    LD A,V_IRQST
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,#$01
+    ST A,V_IRQST
+    LD A,V_IRQST
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+
+    ; masked: a pending IRQ waits for CLI
+    JSR IRQ_RESET
+    LD A,#$01
+    ST A,V_IRQEN
+    WAITV                           ; I is set, so VBlank stays pending
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 0
+    CLI
+    NOP                             ; taken here
+    SEI
+    CLR A
+    ST A,V_IRQEN
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 1
+
+    ; WAIT wakes on a masked interrupt without taking it
+    JSR IRQ_RESET
+    LD A,#$01
+    ST A,V_IRQEN
+    WAIT
+    LD A,V_LINE
+    MOV GP,A
+    CLR A
+    ST A,V_IRQEN
+    LD A,#$03
+    ST A,V_IRQST
+    MOV A,GP
+    JSR T_V8
+    .BYTE 240
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 0
+
+    ; an IRQ in the middle of a MOVB: taken, then the copy finishes
+    LD X,#BIG
+    FILL [X],#$5AA5,#4500
+    LD X,#BIG2
+    FILL [X],#0,#4600
+    JSR IRQ_RESET
+    WAITV
+    LD A,#250                       ; 10 lines into a copy of about 20
+    ST A,V_IRQLINE
+    LD A,#$03                       ; the old compare line went by during WAITV
+    ST A,V_IRQST
+    LD A,#$02
+    ST A,V_IRQEN
+    CLI
+    LD X,#BIG
+    LD Y,#BIG2
+    MOVB [X],[Y],#9000
+    SEI
+    MOV Q,Y
+    ST Q,SDIFF
+    CLR A
+    ST A,V_IRQEN
+    LD A,ISR_HITS
+    JSR T_V8
+    .BYTE 1
+    LD A,ISR_LINE
+    JSR T_V8
+    .BYTE 250
+    LD A,BIG2+8999                  ; last byte copied ($5A, the high byte of $5AA5)
+    JSR T_V8
+    .BYTE $5A
+    LD A,BIG2+9000                  ; and no further
+    JSR T_V8
+    .BYTE $00
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BIG2+9000
+    LD A,#$03
+    ST A,V_IRQST
+    RTS
+
+IRQ_RESET:
+    SEI
+    CLR A
+    ST A,ISR_HITS
+    ST A,ISR_LINE
+    ST A,ISR_ST
+    ST A,V_IRQEN
+    LD A,#$03
+    ST A,V_IRQST
+    RTS
+
+; after a full-frame interrupt: keep what came back
+SAVE_REGS:
+    ST Q,R_Q
+    MOV Q,X
+    ST Q,R_X
+    MOV Q,Y
+    ST Q,R_Y
+    MOV A,GP
+    ST A,R_GP
+    MOV A,DP
+    ST A,R_DP
+    RTS
+
+CHECK_REGS:
+    LD Q,R_Q
+    JSR T_V32
+    .LONG $11223344
+    LD Q,R_X
+    JSR T_V32
+    .LONG $00123456
+    LD Q,R_Y
+    JSR T_V32
+    .LONG $00654321
+    LD A,R_GP
+    JSR T_V8
+    .BYTE $77
+    LD A,R_DP
+    JSR T_V8
+    .BYTE $5A
+    RTS
+
+; the 19-byte frame: CC (E set), Q, GP, DP, X, Y, SP before, PC
+CHECK_FRAME:
+    LD A,ISR_FRAME
+    AND A,#FL_E
+    JSR T_V8
+    .BYTE FL_E
+    LD Q,ISR_FRAME+1
+    JSR T_V32
+    .LONG $11223344
+    LD A,ISR_FRAME+5
+    JSR T_V8
+    .BYTE $77
+    LD A,ISR_FRAME+6
+    JSR T_V8
+    .BYTE $5A
+    LD Q,ISR_FRAME+7
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG $00123456
+    LD Q,ISR_FRAME+10
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG $00654321
+    LD Q,ISR_FRAME+13
+    AND Q,#$00FFFFFF
+    SUB Q,SP0
+    JSR T_V32
+    .LONG 0
+    RTS
+
+; full frame handler (SWI, NMI): copies the frame, then trashes every register
+H_FULL:
+    MOV Q,SP
+    ST Q,ISR_SP
+    MOV X,SP
+    LD Y,#ISR_FRAME
+    MOVB [X],[Y],#19
+    MOV A,CC
+    ST A,ISR_CC
+    LD Q,#0
+    LD X,#0
+    LD Y,#0
+    MOV GP,#0
+    MOV DP,A
+    RTI
+
+; lean frame handler (FIRQ): copies the frame, leaves A = $99
+H_LEAN:
+    MOV Q,SP
+    ST Q,ISR_SP
+    MOV X,SP
+    LD Y,#ISR_FRAME
+    MOVB [X],[Y],#4
+    MOV A,CC
+    ST A,ISR_CC
+    LD A,#$99
+    RTI
+
+; video IRQ handler: counts, notes the line and what was pending, clears it
+H_IRQ:
+    ADDZ ISR_HITS,#1
+    LD A,V_LINE
+    ST A,ISR_LINE
+    LD A,V_IRQST
+    ST A,ISR_ST
+    ST A,V_IRQST
+    RTI
+
+; line timing: WAITV wakes at the start of line 240; a line is 455 cycles
+SYS_TIMING:
+    JSR T_SECT
+    .BYTE "TIMING", 0
+    WAITV                           ; VBlank starts at line 240
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 240
+    WAITV                           ; V_STAT bit 0 is set in VBlank
+    LD A,V_STAT
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    WAITV                           ; 2002 cycles = 4.4 lines
+    LD W,#1000
+.D1:
+    DBNZ W,.D1
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 244
+    WAITV                           ; 22.5 lines: past 261, wrapped to line 0 (262 lines a frame)
+    LD W,#5118
+.D2:
+    DBNZ W,.D2
+    LD A,V_LINE
+    MOV GP,A
+    LD A,V_STAT                     ; and VBlank is over
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+    MOV A,GP
+    JSR T_V8
+    .BYTE 0
+    WAITV                           ; 23.5 lines: line 1
+    LD W,#5345
+.D3:
+    DBNZ W,.D3
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 1
+    WAITV                           ; 1137 NOPs of 1 cycle = 2.5 lines
+    .DS 2274, 0
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 242
+    LD X,#BIG                       ; MOVB: 1 cycle a byte, 1137 bytes = 2.5 lines
+    LD Y,#BIG2
+    WAITV
+    MOVB [X],[Y],#1137
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 242
+    LD X,#BIG                       ; MOVW: 1 cycle a word
+    LD Y,#BIG2
+    WAITV
+    MOVW [X],[Y],#1137
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 242
+    LD X,#BIG                       ; FILL in main RAM: 2 words a cycle, 2274 words = 2.5 lines
+    WAITV
+    FILL [X],#0,#2274
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 242
+    WAITV                           ; V_STAT bit 1 is HBlank (dots 320-454): sample it for 2 lines
+    CLR B
+    LD E,#$FF
+    LD F,#130
+.H:
+    LD A,V_STAT
+    OR B,A
+    AND E,A
+    DBNZ F,.H
+    MOV GP,E
+    MOV A,B                         ; seen set
+    AND A,#$02
+    JSR T_V8
+    .BYTE $02
+    MOV A,GP                        ; and seen clear
+    AND A,#$02
+    JSR T_V8
+    .BYTE $00
+    RTS
+
+; the audio engine as the CPU sees it: voice state, envelope levels, ENDX and FIRQ
+; Sample 0: 64 samples at $0100, one-shot or looped. Sample 1: 16 samples at $0200.
+; One output tick is 224 cycles.
+SYS_AUDIO:
+    JSR T_SECT
+    .BYTE "AUDIO", 0
+    LD A,#$03                       ; reset and enable; RESET reads back 0
+    ST A,AUD_ACTRL
+    LD A,AUD_ACTRL
+    JSR T_V8
+    .BYTE $01
+    CLR A                           ; silent: master volume 0
+    ST A,AUD_MVOL_L
+    ST A,AUD_MVOL_R
+    LD A,#$20
+    ST A,AUD_DIR
+    LD X,#AUD_SAMPLES
+    LD Y,#ARAM_BASE+$2000
+    MOVB [X],[Y],#16
+    LD X,#ARAM_BASE+$0100
+    FILL [X],#$4040,#32
+    LD X,#ARAM_BASE+$0200
+    FILL [X],#$4040,#8
+    LD D,#$1000                     ; voice 0: pitch 1.0, sample 0
+    ST D,AUD_V0_PITCH_L
+    CLR A
+    ST A,AUD_V0_SRC
+    ST A,AUD_V0_CTRL
+    LD A,#$F0                       ; attack instant, decay holds
+    ST A,AUD_V0_ADSR1
+    LD A,#$F0                       ; sustain 15, release holds
+    ST A,AUD_V0_ADSR2
+    LD A,AUD_V0_ADSR1               ; voice registers read back
+    JSR T_V8
+    .BYTE $F0
+    LD A,AUD_V0_PITCH_H
+    JSR T_V8
+    .BYTE $10
+
+    LD A,#$01                       ; key on: playing, envelope at 255 after a tick
+    ST A,AUD_KON
+    LD W,#300
+    JSR DELAY
+    LD A,AUD_STAT
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,AUD_ENVX
+    JSR T_V8
+    .BYTE 255
+    LD W,#3000                      ; ~30 ticks in: not at the end yet
+    JSR DELAY
+    LD A,AUD_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+    LD W,#6000                      ; past 64 ticks: the one-shot ended and fell silent
+    JSR DELAY
+    LD A,AUD_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,AUD_STAT
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+    LD A,#$01                       ; ENDX: write 1 to clear
+    ST A,AUD_ENDX
+    LD A,AUD_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+
+    LD D,#$2000                     ; pitch 2.0: the 64 samples end in 32 ticks
+    ST D,AUD_V0_PITCH_L
+    LD A,#$01
+    ST A,AUD_KON
+    LD W,#4500                      ; ~40 ticks
+    JSR DELAY
+    LD A,AUD_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,#$01
+    ST A,AUD_ENDX
+    LD D,#$1000
+    ST D,AUD_V0_PITCH_L
+
+    LD A,#$01                       ; looped: ENDX set at the end, still playing
+    ST A,AUD_V0_CTRL
+    ST A,AUD_KON
+    LD W,#9000
+    JSR DELAY
+    LD A,AUD_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,AUD_STAT
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,#$01                       ; key off with release 0: holds at 255
+    ST A,AUD_KOFF
+    LD W,#300
+    JSR DELAY
+    LD A,AUD_ENVX
+    JSR T_V8
+    .BYTE 255
+    LD A,#$FF                       ; release 15 is instant: silent after a tick
+    ST A,AUD_V0_ADSR2
+    LD A,#$01
+    ST A,AUD_KOFF
+    LD W,#300
+    JSR DELAY
+    LD A,AUD_ENVX
+    JSR T_V8
+    .BYTE 0
+    LD A,AUD_STAT
+    AND A,#$01
+    JSR T_V8
+    .BYTE $00
+
+    LD A,#$FF                       ; decay 15 to sustain 7: level (7+1) x 16 - 1 = 127
+    ST A,AUD_V0_ADSR1
+    LD A,#$70
+    ST A,AUD_V0_ADSR2
+    LD A,#$01
+    ST A,AUD_KON
+    LD W,#600
+    JSR DELAY
+    LD A,AUD_ENVX
+    JSR T_V8
+    .BYTE 127
+
+    LD A,#$C0                       ; attack 12 adds 64 a tick: ~100 ticks = level ~25
+    ST A,AUD_V0_ADSR1
+    LD A,#$F0
+    ST A,AUD_V0_ADSR2
+    LD A,#$01
+    ST A,AUD_KON
+    LD W,#11200
+    JSR DELAY
+    LD A,AUD_ENVX
+    JSR T_R8
+    .BYTE 22, 28
+
+    LD A,#$03                       ; ACTRL RESET silences everything and clears ENDX
+    ST A,AUD_ACTRL
+    LD A,AUD_STAT
+    JSR T_V8
+    .BYTE $00
+    LD A,AUD_ENDX
+    JSR T_V8
+    .BYTE $00
+
+    CLR A                           ; engine off: a key on doesn't start a voice
+    ST A,AUD_ACTRL
+    LD A,#$F0
+    ST A,AUD_V0_ADSR1
+    LD A,#$01
+    ST A,AUD_KON
+    LD W,#300
+    JSR DELAY
+    LD A,AUD_STAT
+    JSR T_V8
+    .BYTE $00
+    LD A,#$03
+    ST A,AUD_ACTRL
+
+    LD X,#VEC_FIRQ                  ; ENDX with IRQEN raises FIRQ
+    LD Y,#H_AUDIO
+    JSR SET_VECTOR
+    CLR A
+    ST A,AF_HITS
+    ST A,AF_ENDX
+    ST A,AUD_V0_CTRL
+    LD A,#$01
+    ST A,AUD_V0_SRC                 ; sample 1, 16 ticks long
+    ST A,AUD_IRQEN
+    LD A,#$10                       ; F clear, I set
+    MOV CC,A
+    LD A,#$01
+    ST A,AUD_KON
+    LD W,#3000
+    JSR DELAY
+    LD A,#$50
+    MOV CC,A
+    CLR A
+    ST A,AUD_IRQEN
+    LD A,AF_HITS
+    JSR T_V8
+    .BYTE 1
+    LD A,AF_ENDX
+    AND A,#$01
+    JSR T_V8
+    .BYTE $01
+    LD A,AUD_ENDX
+    JSR T_V8
+    .BYTE $00
+    LD A,#$03
+    ST A,AUD_ACTRL
+    CLR A
+    ST A,AUD_ACTRL
+    RTS
+
+; audio FIRQ: lean frame, so it saves what it uses
+H_AUDIO:
+    PUSH A
+    LD A,AUD_ENDX
+    ST A,AF_ENDX
+    ST A,AUD_ENDX
+    ADDZ AF_HITS,#1
+    POP A
+    RTI
+
+; sample directory: start, loop, end, 2 spare
+AUD_SAMPLES:
+    .WORD $0100, $0100, $0140, 0
+    .WORD $0200, $0200, $0210, 0
+
+ISR_SP:     .LONG 0
+ISR_CC:     .BYTE 0
+ISR_A:      .BYTE 0
+ISR_HITS:   .BYTE 0
+ISR_LINE:   .BYTE 0
+ISR_ST:     .BYTE 0
+ISR_FRAME:  .DS 24
+R_Q:        .LONG 0
+R_X:        .LONG 0
+R_Y:        .LONG 0
+R_GP:       .BYTE 0
+R_DP:       .BYTE 0
+AF_HITS:    .BYTE 0
+AF_ENDX:    .BYTE 0

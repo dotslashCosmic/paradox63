@@ -1,0 +1,224 @@
+; t_ppu.p63 - the PPU page and the video checks the CPU can see
+; The page is built from acid_gfx.p63: each labelled cell hides red under whatever
+; the feature should draw on top, so a correct picture has no pure red anywhere.
+
+PAL_RAST    EQU VRAM_PALETTE+ACID_RAST_PAL*16
+
+PPU_TESTS:
+    JSR T_SECT
+    .BYTE "PPU", 0
+    SEI
+    LD A,#1                         ; the page takes over the screen
+    ST A,T_QUIET
+    JSR ACID_SETUP
+    JSR ACID_FRAME                  ; one whole frame with the page up
+    JSR ACID_FRAME
+
+    JSR ACID_FRAME                  ; sprite overflow (33 on line 208) is set by line 230
+.L230:
+    LD A,V_LINE
+    CMP A,#230
+    BNE .L230
+    LD A,V_STAT
+    AND A,#$04
+    JSR T_V8
+    .BYTE $04
+.L100:                              ; and cleared at the start of VBlank, so 0 at line 100
+    LD A,V_LINE
+    CMP A,#100
+    BNE .L100
+    LD A,V_STAT
+    AND A,#$04
+    JSR T_V8
+    .BYTE $00
+
+    JSR ACID_SUMMARY
+    JSR ACID_FRAME
+    JSR ACID_FRAME
+    LD A,#1
+    ST A,T_ACID
+    JMP T_FINISH
+
+; Draws the page and starts the raster/VBlank handler
+ACID_SETUP:
+    CLR A
+    ST A,V_IRQEN
+    LD X,#VRAM_PATTERN              ; bank 0 and tiles 768-1023 are red decoys
+    FILL [X],#$2222,#4096
+    LD X,#VRAM_PATTERN+768*32
+    FILL [X],#$2222,#4096
+    LD X,#ACID_BG_TILES             ; BG tiles in bank 1
+    LD Y,#VRAM_PATTERN+256*32
+    MOVB [X],[Y],#ACID_BG_TILES_END-ACID_BG_TILES
+    LD X,#T_FONT                    ; and the font, so BG2 text is tile = ASCII
+    LD Y,#VRAM_PATTERN+(256+32)*32
+    MOVB [X],[Y],#T_FONT_END-T_FONT
+    LD X,#ACID_SPR_TILES
+    LD Y,#VRAM_PATTERN+ACID_SPR_BASE*32
+    MOVB [X],[Y],#ACID_SPR_TILES_END-ACID_SPR_TILES
+    LD X,#ACID_PALS
+    LD Y,#VRAM_PALETTE
+    MOVB [X],[Y],#ACID_PALS_END-ACID_PALS
+    LD X,#VRAM_BG0                  ; empty maps
+    FILL [X],#0,#1200
+    LD X,#VRAM_BG1
+    FILL [X],#0,#1200
+    LD X,#VRAM_BG2
+    FILL [X],#0,#1200
+
+    LD Y,#ACID_MAP                  ; map entries: layer, column, row, tile, attribute
+.MAP:
+    LD A,0,Y
+    CMP A,#$FF
+    BEQ .MAPPED
+    LD X,#VRAM_BG0
+    CMP A,#1
+    BNE .NOT1
+    LD X,#VRAM_BG1
+.NOT1:
+    CMP A,#2
+    BNE .NOT2
+    LD X,#VRAM_BG2
+.NOT2:
+    LD A,2,Y
+    LD B,#40
+    MUL A,B
+    LD E,#0
+    LD F,1,Y
+    ADD D,W
+    ASL D
+    SMODX X,D
+    LD A,3,Y
+    ST A,0,X
+    LD A,4,Y
+    ST A,1,X
+    LEA Y,5,Y
+    BRA .MAP
+.MAPPED:
+
+    LD X,#SPR_OAM                   ; hide every sprite, then load the page's
+    LD A,#255
+    LD W,#SPR_COUNT
+.HIDE:
+    ST A,SPR_Y,X
+    LEA X,SPR_SIZE,X
+    DBNZ W,.HIDE
+    LD X,#ACID_OAM
+    LD Y,#SPR_OAM
+    MOVB [X],[Y],#ACID_OAM_COUNT*SPR_SIZE
+
+    LD Y,#ACID_LABELS               ; labels: column, row, text, 0
+.LABEL:
+    LD A,0,Y
+    CMP A,#$FF
+    BEQ .LABELLED
+    MOV GP,A
+    LD A,1,Y
+    LD B,#40
+    MUL A,B
+    LD E,#0
+    MOV F,GP
+    ADD D,W
+    ASL D
+    LD X,#VRAM_BG2
+    SMODX X,D
+    LEA Y,2,Y
+.CHAR:
+    LD A,0,Y
+    LEA Y,1,Y
+    TST A
+    BEQ .LABEL
+    ST A,0,X
+    LEA X,2,X
+    BRA .CHAR
+.LABELLED:
+
+    LD A,#ACID_BANK
+    ST A,V_BANK
+    LD A,#ACID_PALGRP
+    ST A,V_PALGRP
+    LD D,#ACID_SCROLLX0
+    ST D,V_SCROLLX0
+    LD D,#ACID_SCROLLY0
+    ST D,V_SCROLLY0
+    LD D,#ACID_SCROLLX1
+    ST D,V_SCROLLX1
+    LD D,#ACID_SCROLLY1
+    ST D,V_SCROLLY1
+    CLR A
+    ST A,V_BRIGHT
+    LD A,#$39                       ; picture, BG0, BG1 and sprites
+    ST A,V_CTRL
+
+    LD X,#VEC_IRQ
+    LD Y,#H_ACID
+    JSR SET_VECTOR
+    LD A,#ACID_RAST_LINE
+    ST A,V_IRQLINE
+    LD A,#$03
+    ST A,V_IRQST
+    ST A,V_IRQEN                    ; VBlank and raster
+    CLI
+    RTS
+
+; Raster line: swap palette 24's colours 1 and 2. VBlank: swap them back.
+H_ACID:
+    LD A,V_IRQST
+    ST A,V_IRQST
+    MOV B,A
+    TBZ B,#1,.NOT_RASTER
+    LD A,#$E0
+    ST A,PAL_RAST+1
+    LD A,#$1C
+    ST A,PAL_RAST+2
+.NOT_RASTER:
+    TBZ B,#0,.NOT_VBLANK
+    LD A,#$1C
+    ST A,PAL_RAST+1
+    LD A,#$E0
+    ST A,PAL_RAST+2
+    ADDZ ACID_FRAMES,#1
+.NOT_VBLANK:
+    RTI
+
+; Waits for the next VBlank with interrupts running (WAITV would hold them off)
+ACID_FRAME:
+    LD A,ACID_FRAMES
+.WAIT:
+    WAIT
+    CMP A,ACID_FRAMES
+    BEQ .WAIT
+    RTS
+
+ACID_FRAMES: .BYTE 0
+
+; BG2 rows 28-29: the check counts, and the first failure if any
+ACID_SUMMARY:
+    LD X,#S_CHECKS
+    LD Y,#VRAM_BG2+(28*40+1)*2
+    JSR T_PUTS
+    LD D,T_NUM
+    JSR T_HEX16
+    LD X,#S_FAILS
+    JSR T_PUTS
+    LD D,T_FAILS
+    JSR T_HEX16
+    LD Y,#VRAM_BG2+(29*40+1)*2
+    LD D,T_FAILS
+    TST D
+    BNE .FAILED
+    LD X,#S_ALL_PASS
+    JMP T_PUTS
+.FAILED:
+    LD X,#S_FIRST
+    JSR T_PUTS
+    LD D,T_LOG
+    JSR T_HEX16
+    LEA Y,2,Y
+    LD X,T_LOG+12
+    JMP T_PUTS
+
+S_CHECKS:   .BYTE "CHECKS $", 0
+S_FAILS:    .BYTE "  FAILED $", 0
+S_ALL_PASS: .BYTE "ALL CHECKS PASS", 0
+S_FIRST:    .BYTE "FIRST: $", 0

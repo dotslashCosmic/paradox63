@@ -1,0 +1,1736 @@
+; t_cpu.p63 - CPU checks: loads, ALU, shifts, bits, multiply/divide, addressing,
+; branches, stack and block operations
+; Flags are written H N Z V C; a mask lists only the flags the instruction defines.
+
+CPU_TESTS:
+    JSR CPU_LOADS
+    JSR CPU_ALU
+    JSR CPU_SHIFTS
+    JSR CPU_BITS
+    JSR CPU_MULDIV
+    JSR CPU_ADDRESSING
+    JSR CPU_BRANCHES
+    JSR CPU_STACK
+    JSR CPU_BLOCK
+    RTS
+
+; loads and moves set N and Z from the value; ST and EXG touch no flags
+CPU_LOADS:
+    JSR T_SECT
+    .BYTE "LOADS AND MOVES", 0
+
+    LD A,#$00                       ; Z
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_NZ
+
+    LD A,#$80                       ; N
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N, M_NZ
+
+    LD D,#$8001                     ; N from bit 15
+    PUSH CC
+    JSR T_F16
+    .WORD $8001
+    .BYTE FL_N, M_NZ
+
+    LD Q,#$00000000                 ; Z over all 32 bits
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, M_NZ
+
+    LD Q,#$80000000                 ; N from bit 31
+    PUSH CC
+    JSR T_V32
+    .LONG $80000000
+    JSR T_FL
+    .BYTE FL_N, M_NZ
+
+    CLR A                           ; MOV A,B copies and sets N
+    LD B,#$90
+    MOV A,B
+    PUSH CC
+    JSR T_F8
+    .BYTE $90, FL_N, M_NZ
+
+    LD B,#$55                       ; ST leaves the Z from LD A,#0
+    LD A,#$00
+    ST B,TB
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, M_NZ
+    LD A,TB
+    JSR T_V8
+    .BYTE $55
+
+    LD A,#$12                       ; D = A:B
+    LD B,#$34
+    JSR T_V16
+    .WORD $1234
+
+    LD D,#$ABCD                     ; A is the high byte of D
+    JSR T_V8
+    .BYTE $AB
+
+    LD D,#$ABCD                     ; B is the low byte
+    MOV A,B
+    JSR T_V8
+    .BYTE $CD
+
+    LD W,#$1234                     ; E is the high byte of W
+    MOV A,E
+    JSR T_V8
+    .BYTE $12
+
+    LD W,#$1234                     ; F is the low byte
+    MOV A,F
+    JSR T_V8
+    .BYTE $34
+
+    LD D,#$1234                     ; Q = D:W
+    LD W,#$5678
+    JSR T_V32
+    .LONG $12345678
+
+    LD W,#$1280                     ; MOV to a narrower register keeps the low byte
+    MOV A,W
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N, M_NZ
+
+    LD A,#$80                       ; MOV to a wider register zero-extends: $0080, not negative
+    MOV D,A
+    PUSH CC
+    JSR T_F16
+    .WORD $0080
+    .BYTE 0, M_NZ
+
+    LD X,#$123456                   ; MOV Q,X zero-extends the 24 bits
+    MOV Q,X
+    JSR T_V32
+    .LONG $00123456
+
+    LD W,#$0000                     ; MOV X,W sets Z like every MOV (LD A,#1 clears it first)
+    LD A,#1
+    MOV X,W
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, M_NZ
+
+    LD A,#$11                       ; EXG swaps and leaves the Z from LD E,#0
+    LD B,#$22
+    LD E,#0
+    EXG A,B
+    PUSH CC
+    JSR T_V16
+    .WORD $2211
+    JSR T_FL
+    .BYTE FL_Z, M_NZ
+
+    LD D,#$1234                     ; EXG D,W
+    LD W,#$5678
+    EXG D,W
+    JSR T_V32
+    .LONG $56781234
+
+    LD X,#$111111                   ; EXG X,Y
+    LD Y,#$222222
+    EXG X,Y
+    MOV Q,X
+    JSR T_V32
+    .LONG $00222222
+
+    MOV GP,#$80                     ; LDI sets N
+    PUSH CC
+    MOV A,GP
+    JSR T_F8
+    .BYTE $80, FL_N, M_NZ
+
+    LD X,#$823456                   ; a 24-bit load sets N from bit 23
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $00823456
+    JSR T_FL
+    .BYTE FL_N, M_NZ
+
+    LD A,#1                         ; MOVQ Q,#0 sets Z
+    MOVQ Q,#0
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, M_NZ
+
+    LD Q,#$CAFEBABE                 ; MOVQ from memory
+    ST Q,TB
+    LD Q,#0
+    MOVQ Q,TB
+    JSR T_V32
+    .LONG $CAFEBABE
+
+    LD Q,#$00654321                 ; LD X,addr reads a 24-bit pointer, low byte first
+    ST Q,TB
+    LD X,TB
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $00654321
+    JSR T_FL
+    .BYTE 0, M_NZ
+    RTS
+
+; add, subtract, inc/dec/neg and logic, with every flag they define
+CPU_ALU:
+    JSR T_SECT
+    .BYTE "ALU AND FLAGS", 0
+
+    LD A,#$7F                       ; $7F+1 = $80: F+1 carries out of bit 3 -> H; pos+pos=neg -> V
+    ADD A,#$01
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_H|FL_N|FL_V, M_HNZVC
+
+    LD A,#$FF                       ; $FF+1 = $00: H, Z, C
+    ADD A,#$01
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_H|FL_Z|FL_C, M_HNZVC
+
+    LD A,#$80                       ; $80+$80 = $00: no H; neg+neg=pos -> V; Z, C
+    ADD A,#$80
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z|FL_V|FL_C, M_HNZVC
+
+    LD A,#$12                       ; $12+$34 = $46, no flags
+    ADD A,#$34
+    PUSH CC
+    JSR T_F8
+    .BYTE $46, 0, M_HNZVC
+
+    SEC                             ; $10+$0F+C = $20: 0+F+1 carries out of bit 3 -> H
+    LD A,#$10
+    ADC A,#$0F
+    PUSH CC
+    JSR T_F8
+    .BYTE $20, FL_H, M_HNZVC
+
+    LD A,#$12                       ; ADD with a register source
+    LD B,#$21
+    ADD A,B
+    JSR T_V8
+    .BYTE $33
+
+    LD A,#$40                       ; ADD with a memory source
+    LD B,#$02
+    ST B,TB
+    ADD A,TB
+    JSR T_V8
+    .BYTE $42
+
+    LD A,#$00                       ; $00-$01 = $FF: borrow -> C; 0<1 in bit 3 -> H; N
+    SUB A,#$01
+    PUSH CC
+    JSR T_F8
+    .BYTE $FF, FL_H|FL_N|FL_C, M_HNZVC
+
+    LD A,#$80                       ; $80-$01 = $7F: neg-pos=pos -> V; H
+    SUB A,#$01
+    PUSH CC
+    JSR T_F8
+    .BYTE $7F, FL_H|FL_V, M_HNZVC
+
+    LD A,#$05                       ; $05-$05 = 0 -> Z only
+    SUB A,#$05
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_HNZVC
+
+    SEC                             ; $10-$0F-C = 0 -> Z; low nibble 0-F-1 borrows -> H; no C
+    LD A,#$10
+    SBC A,#$0F
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_H|FL_Z, M_HNZVC
+
+    LD A,#$40                       ; CMP $40,$41: A unchanged; $40-$41 = $FF -> N, C, H
+    CMP A,#$41
+    PUSH CC
+    JSR T_F8
+    .BYTE $40, FL_H|FL_N|FL_C, M_HNZVC
+
+    LD A,#$7F                       ; INC $7F = $80 -> N, V
+    INC A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N|FL_V, M_NZV
+
+    LD A,#$00                       ; DEC $00 = $FF -> N
+    DEC A
+    PUSH CC
+    JSR T_F8
+    .BYTE $FF, FL_N, M_NZV
+
+    LD A,#$80                       ; DEC $80 = $7F -> V
+    DEC A
+    PUSH CC
+    JSR T_F8
+    .BYTE $7F, FL_V, M_NZV
+
+    SEC                             ; INC leaves C alone
+    LD A,#$01
+    INC A
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_C, FL_C
+
+    LD A,#$10                       ; INC by a count: $10+$25 = $35
+    INC A,#$25
+    JSR T_V8
+    .BYTE $35
+
+    LD D,#$0100                     ; DEC D by a count: $0100-3 = $00FD
+    DEC D,#3
+    JSR T_V16
+    .WORD $00FD
+
+    LD A,#$01                       ; NEG $01 = $FF -> N, C
+    NEG A
+    PUSH CC
+    JSR T_F8
+    .BYTE $FF, FL_N|FL_C, M_NZVC
+
+    LD A,#$80                       ; NEG $80 = $80 -> N, V, C
+    NEG A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N|FL_V|FL_C, M_NZVC
+
+    LD A,#$00                       ; NEG $00 = $00 -> Z, no C
+    NEG A
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_NZVC
+
+    SEC                             ; $F0 AND $0F = 0 -> Z, V and C cleared
+    LD A,#$F0
+    AND A,#$0F
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_NZVC
+
+    SEC                             ; $F0 OR $0F = $FF -> N
+    LD A,#$F0
+    OR A,#$0F
+    PUSH CC
+    JSR T_F8
+    .BYTE $FF, FL_N, M_NZVC
+
+    SEC                             ; $FF XOR $0F = $F0 -> N
+    LD A,#$FF
+    XOR A,#$0F
+    PUSH CC
+    JSR T_F8
+    .BYTE $F0, FL_N, M_NZVC
+
+    SEC                             ; NOT $0F = $F0 -> N, V and C cleared
+    LD A,#$0F
+    NOT A
+    PUSH CC
+    JSR T_F8
+    .BYTE $F0, FL_N, M_NZVC
+
+    LD A,#$55                       ; CLR -> 0 with N0 Z1 V0 C0
+    SEC
+    CLR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_NZVC
+
+    CLC                             ; COM $0F = $F0 -> N, and C always set
+    LD A,#$0F
+    COM A
+    PUSH CC
+    JSR T_F8
+    .BYTE $F0, FL_N|FL_C, M_NZVC
+
+    SEC                             ; TST $80: A unchanged -> N, V and C cleared
+    LD A,#$80
+    TST A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N, M_NZVC
+
+    LD D,#$7FFF                     ; D $7FFF+1 = $8000 -> N, V, H
+    ADD D,#1
+    PUSH CC
+    JSR T_F16
+    .WORD $8000
+    .BYTE FL_H|FL_N|FL_V, M_HNZVC
+
+    LD W,#$0001                     ; W $0001-$0002 = $FFFF -> N, C, H
+    SUB W,#$0002
+    PUSH CC
+    MOV D,W
+    JSR T_F16
+    .WORD $FFFF
+    .BYTE FL_H|FL_N|FL_C, M_HNZVC
+
+    LD Q,#$FFFFFFFF                 ; Q $FFFFFFFF+1 = 0 -> Z, C, H
+    ADD Q,#1
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_H|FL_Z|FL_C, M_HNZVC
+
+    LD Q,#$12345678                 ; Q - memory
+    LD W,#$1111
+    LD D,#$0000
+    ST Q,TB
+    LD Q,#$23456789
+    SUB Q,TB
+    JSR T_V32
+    .LONG $23455678
+
+    LD X,#$7FFFFF                   ; X $7FFFFF+1 = $800000 -> N, V at 24 bits
+    ADD X,#1
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $00800000
+    JSR T_FL
+    .BYTE FL_N|FL_V, M_NZVC
+
+    LD A,#$03                       ; GP is a full ALU register
+    MOV GP,#$40
+    ADD GP,#$03
+    MOV A,GP
+    JSR T_V8
+    .BYTE $43
+    RTS
+
+; shifts and rotates: C = the last bit out; ASL/ROL/RCL V = N xor C; ROR/RCR leave V
+CPU_SHIFTS:
+    JSR T_SECT
+    .BYTE "SHIFTS", 0
+
+    LD A,#$81                       ; ASL $81 = $02, C1, V = 0 xor 1
+    ASL A
+    PUSH CC
+    JSR T_F8
+    .BYTE $02, FL_V|FL_C, M_NZVC
+
+    LD A,#$40                       ; ASL $40 = $80, N, C0, V = 1 xor 0
+    ASL A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N|FL_V, M_NZVC
+
+    LD A,#$81                       ; ASR keeps the sign: $C0, C1, V0
+    ASR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $C0, FL_N|FL_C, M_NZVC
+
+    LD A,#$81                       ; LSR $81 = $40, C1
+    LSR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $40, FL_C, M_NZVC
+
+    LD A,#$01                       ; LSR $01 = 0, Z, C
+    LSR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z|FL_C, M_NZVC
+
+    SEC                             ; ROL ignores C: $80 -> $01, C1, V = 0 xor 1
+    LD A,#$80
+    ROL A
+    PUSH CC
+    JSR T_F8
+    .BYTE $01, FL_V|FL_C, M_NZVC
+
+    CLC                             ; ROR $01 -> $80, C1, N; V stays set
+    SEV
+    LD A,#$01
+    ROR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N|FL_V|FL_C, M_NZVC
+
+    CLC                             ; RCL $80 with C0 -> $00, C1, Z, V = 0 xor 1
+    LD A,#$80
+    RCL A
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z|FL_V|FL_C, M_NZVC
+
+    SEC                             ; RCR $00 with C1 -> $80, C0, N; V stays clear
+    CLV
+    LD A,#$00
+    RCR A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N, M_NZVC
+
+    SEC                             ; RCL by 9 goes all the way round the 9-bit ring
+    LD A,#$5A
+    RCL A,#9
+    PUSH CC
+    JSR T_F8
+    .BYTE $5A, FL_V|FL_C, M_NZVC
+
+    LD A,#$0F                       ; ASL by 4: $F0, the 4 bits out were 0 -> C0; V = 1 xor 0
+    ASL A,#4
+    PUSH CC
+    JSR T_F8
+    .BYTE $F0, FL_N|FL_V, M_NZVC
+
+    LD A,#$0F                       ; LSR by 3: $01, the last bit out was 1
+    LSR A,#3
+    PUSH CC
+    JSR T_F8
+    .BYTE $01, FL_C, M_NZVC
+
+    LD A,#$A5                       ; ROL by 8 is back to $A5; the last bit out was bit 0 = 1
+    ROL A,#8
+    PUSH CC
+    JSR T_F8
+    .BYTE $A5, FL_N|FL_C, M_NZVC
+
+    CLV                             ; ROR $12 by 4 = $21, the last bit out was bit 3 = 0
+    LD A,#$12
+    ROR A,#4
+    PUSH CC
+    JSR T_F8
+    .BYTE $21, 0, M_NZVC
+
+    LD A,#$C0                       ; LSL is ASL: $80, C1, V0
+    LSL A
+    PUSH CC
+    JSR T_F8
+    .BYTE $80, FL_N|FL_C, M_NZVC
+
+    LD D,#$8001                     ; 16 bits: ASL $8001 = $0002, C1, V1
+    ASL D
+    PUSH CC
+    JSR T_F16
+    .WORD $0002
+    .BYTE FL_V|FL_C, M_NZVC
+
+    LD W,#$1234                     ; LSR W by 8 = $0012; bit 7 of $34 went last -> C0
+    LSR W,#8
+    PUSH CC
+    MOV D,W
+    JSR T_F16
+    .WORD $0012
+    .BYTE 0, M_NZVC
+
+    LD Q,#$80000000                 ; ASR Q by 31 = $FFFFFFFF; bit 30 went last -> C0
+    ASR Q,#31
+    PUSH CC
+    JSR T_V32
+    .LONG $FFFFFFFF
+    JSR T_FL
+    .BYTE FL_N, M_NZVC
+
+    LD X,#$400000                   ; 24 bits: ASL X = $800000, N, V
+    ASL X
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $00800000
+    JSR T_FL
+    .BYTE FL_N|FL_V, M_NZVC
+
+    MOV GP,#$03                     ; any register shifts: GP $03 << 2 = $0C
+    ASL GP,#2
+    PUSH CC
+    MOV A,GP
+    JSR T_F8
+    .BYTE $0C, 0, M_NZVC
+
+    SEC                             ; SWAP $1F = $F1 -> N, V and C cleared
+    LD A,#$1F
+    SWAP A
+    PUSH CC
+    JSR T_F8
+    .BYTE $F1, FL_N, M_NZVC
+
+    LD D,#$12AB                     ; SWAP swaps the nibbles of every byte
+    SWAP D
+    PUSH CC
+    JSR T_F16
+    .WORD $21BA
+    .BYTE 0, M_NZVC
+    RTS
+
+; bit tests and changes, fields, pack/unpack, extension, BCD
+CPU_BITS:
+    JSR T_SECT
+    .BYTE "BITS AND FIELDS", 0
+
+    SEC                             ; BIT $7F,$80: A unchanged, Z, V0, C untouched
+    LD A,#$7F
+    BIT A,#$80
+    PUSH CC
+    JSR T_F8
+    .BYTE $7F, FL_Z|FL_C, M_NZVC
+
+    LD A,#$80                       ; BIT $80,$C0 -> N
+    BIT A,#$C0
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_N, M_NZV
+
+    LD A,#$00                       ; BSET A,#3 = $08 and leaves the Z from LD A,#0
+    BSET A,#3
+    PUSH CC
+    JSR T_F8
+    .BYTE $08, FL_Z, M_NZ
+
+    LD A,#$FF                       ; BCLR A,#7 = $7F
+    BCLR A,#7
+    JSR T_V8
+    .BYTE $7F
+
+    LD A,#$55                       ; BCHG A,#0 = $54
+    BCHG A,#0
+    JSR T_V8
+    .BYTE $54
+
+    CLR A                           ; BSET on memory
+    ST A,TB
+    BSET TB,#7
+    LD A,TB
+    JSR T_V8
+    .BYTE $80
+
+    LD X,#TB                        ; BCHG on indexed memory: $80 -> $81
+    BCHG 0,X,#0
+    LD A,TB
+    JSR T_V8
+    .BYTE $81
+
+    LD D,#$0000                     ; BSET D,#15 = $8000
+    BSET D,#15
+    JSR T_V16
+    .WORD $8000
+
+    LD A,#$10                       ; BTST bit 4 of $10: N = the bit, Z = not the bit
+    BTST A,#4
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_N, M_NZV
+
+    LD A,#$10                       ; BTST bit 3 of $10 -> Z
+    BTST A,#3
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, M_NZV
+
+    BTST TB,#7                      ; BTST on memory ($81)
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_N, M_NZV
+
+    SEC                             ; BEXT bits 4-11 of $ABCD = $BC -> N, V and C cleared
+    LD D,#$ABCD
+    BEXT A,D,#4,#8
+    PUSH CC
+    JSR T_F8
+    .BYTE $BC, FL_N, M_NZVC
+
+    LD D,#$1230                     ; BEXT bits 0-3 of $1230 = 0 -> Z
+    BEXT A,D,#0,#4
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z, M_NZVC
+
+    LD D,#$1234                     ; BINS: bits 8-11 of D become $F -> $1F34
+    LD E,#$0F
+    BINS D,E,#8,#4
+    JSR T_V16
+    .WORD $1F34
+
+    LD E,#$12                       ; PACK D,E,F = $1234
+    LD F,#$34
+    PACK D,E,F
+    JSR T_V16
+    .WORD $1234
+
+    LD D,#$ABCD                     ; UNP E,F,D: E = $AB, F = $CD
+    UNP E,F,D
+    MOV D,W
+    JSR T_V16
+    .WORD $ABCD
+
+    SEC                             ; EXT A,D: $80 -> $FF80, N; C untouched
+    LD A,#$80
+    EXT A,D
+    PUSH CC
+    JSR T_F16
+    .WORD $FF80
+    .BYTE FL_N|FL_C, M_NZC
+
+    SEC                             ; ZEXT A,D: $80 -> $0080, V and C cleared
+    LD A,#$80
+    ZEXT A,D
+    PUSH CC
+    JSR T_F16
+    .WORD $0080
+    .BYTE 0, M_NZVC
+
+    LD D,#$8000                     ; EXT D,Q = $FFFF8000
+    EXT D,Q
+    JSR T_V32
+    .LONG $FFFF8000
+
+    LD A,#$09                       ; BCD 09+01: $0A, low digit > 9 -> +6 = $10
+    ADD A,#$01
+    DAA
+    PUSH CC
+    JSR T_F8
+    .BYTE $10, 0, M_NZC
+
+    LD A,#$99                       ; BCD 99+01: $9A -> +$66 = $00, C
+    ADD A,#$01
+    DAA
+    PUSH CC
+    JSR T_F8
+    .BYTE $00, FL_Z|FL_C, M_NZC
+
+    LD A,#$08                       ; BCD 08+08: $10 with H -> +6 = $16
+    ADD A,#$08
+    DAA
+    PUSH CC
+    JSR T_F8
+    .BYTE $16, 0, M_NZC
+
+    LD A,#$10                       ; BCD 10-01: $0F with H -> -6 = $09
+    SUB A,#$01
+    DAA SUB
+    PUSH CC
+    JSR T_F8
+    .BYTE $09, 0, M_NZC
+
+    LD A,#$00                       ; BCD 00-01: $FF with H and C -> -$66 = $99, borrow C
+    SUB A,#$01
+    DAA SUB
+    PUSH CC
+    JSR T_F8
+    .BYTE $99, FL_N|FL_C, M_NZC
+    RTS
+
+; MUL/MULD: C when the product doesn't fit the source width; DIV: C = remainder != 0
+CPU_MULDIV:
+    JSR T_SECT
+    .BYTE "MULTIPLY AND DIVIDE", 0
+
+    LD A,#12                        ; 12 x 10 = 120 = $0078
+    LD B,#10
+    MUL A,B
+    PUSH CC
+    JSR T_F16
+    .WORD $0078
+    .BYTE 0, M_NZVC
+
+    LD A,#$FF                       ; $FF x $FF = $FE01: N (bit 15), C (> 255)
+    LD B,#$FF
+    MUL A,B
+    PUSH CC
+    JSR T_F16
+    .WORD $FE01
+    .BYTE FL_N|FL_C, M_NZVC
+
+    LD A,#0                         ; 0 x 5 = 0 -> Z
+    LD B,#5
+    MUL A,B
+    PUSH CC
+    JSR T_F16
+    .WORD $0000
+    .BYTE FL_Z, M_NZVC
+
+    LD A,#$FE                       ; signed -2 x 3 = -6 = $FFFA, N
+    LD B,#3
+    MUL A,B,S
+    PUSH CC
+    JSR T_F16
+    .WORD $FFFA
+    .BYTE FL_N, M_NZ
+
+    LD D,#1000                      ; 1000 / 7 = 142 ($8E) remainder 6, C
+    LD E,#7
+    DIV D,E
+    PUSH CC
+    MOV GP,B
+    JSR T_F8
+    .BYTE $8E, FL_C, FL_V|FL_C
+    MOV A,GP
+    JSR T_V8
+    .BYTE 6
+
+    LD D,#100                       ; 100 / 10 = 10 remainder 0, no C
+    LD E,#10
+    DIV D,E
+    PUSH CC
+    JSR T_F8
+    .BYTE 10, 0, FL_V|FL_C
+
+    LD D,#$1234                     ; divide by zero: A = $FF, B = low byte of D, V0 C0
+    LD E,#0
+    DIV D,E
+    PUSH CC
+    JSR T_F16
+    .WORD $FF34
+    .BYTE 0, FL_V|FL_C
+
+    LD D,#-100                      ; signed -100 / 7 = -14 ($F2) remainder -2 ($FE)
+    LD E,#7
+    DIV D,E,S
+    JSR T_V16
+    .WORD $F2FE
+
+    LD D,#1000                      ; 1000 mod 7 = 6, V0 C0
+    LD E,#7
+    MOD D,E
+    PUSH CC
+    JSR T_F8
+    .BYTE 6, 0, FL_V|FL_C
+
+    LD D,#$1234                     ; mod by zero: A = low byte of D
+    LD E,#0
+    MOD D,E
+    JSR T_V8
+    .BYTE $34
+
+    LD D,#$1234                     ; MULD $1234 x $0010 = $00012340
+    LD W,#$0010
+    MULD D,W
+    JSR T_V32
+    .LONG $00012340
+
+    LD D,#$FFFF                     ; signed -1 x 2 = -2, N
+    LD W,#2
+    MULD D,W,S
+    PUSH CC
+    JSR T_V32
+    .LONG $FFFFFFFE
+    JSR T_FL
+    .BYTE FL_N, M_NZ
+
+    LD D,#2                         ; MAQ: Q = Q + D x W; Q is D:W = $00020003, plus 6
+    LD W,#3
+    MAQ D,W
+    JSR T_V32
+    .LONG $00020009
+    RTS
+
+; addressing modes: TB holds (i & $FF) xor (i >> 8) for i = 0..1023
+CPU_ADDRESSING:
+    JSR T_SECT
+    .BYTE "ADDRESSING", 0
+    LD X,#TB
+    LD D,#0
+.FILL:
+    MOV E,B
+    XOR E,A
+    ST E,0,X
+    LEA X,1,X
+    INC D
+    CMP D,#1024
+    BNE .FILL
+
+    LD X,#TB+$200                   ; zero offset: TB[$200] = $00 xor $02
+    LD A,0,X
+    JSR T_V8
+    .BYTE $02
+    LD X,#TB+$200                   ; small positive: TB[$205] = $05 xor $02
+    LD A,5,X
+    JSR T_V8
+    .BYTE $07
+    LD X,#TB+$200                   ; small negative: TB[$1F0] = $F0 xor $01
+    LD A,-16,X
+    JSR T_V8
+    .BYTE $F1
+    LD X,#TB+$200                   ; 8-bit: TB[$264] = $64 xor $02
+    LD A,100,X
+    JSR T_V8
+    .BYTE $66
+    LD X,#TB+$200                   ; 8-bit negative: TB[$19C] = $9C xor $01
+    LD A,-100,X
+    JSR T_V8
+    .BYTE $9D
+    LD X,#TB+$200                   ; 5-bit form, +10: TB[$20A] = $0A xor $02
+    .BYTE $D0, $2A
+    JSR T_V8
+    .BYTE $08
+    LD X,#TB+$200                   ; 5-bit form, -1: TB[$1FF] = $FF xor $01
+    .BYTE $D0, $3F
+    JSR T_V8
+    .BYTE $FE
+    LD X,#TB+$200                   ; 3-bit form, -3: TB[$1FD] = $FD xor $01
+    .BYTE $D0, $0D
+    JSR T_V8
+    .BYTE $FC
+    LD X,#TB+$200                   ; 16-bit: TB[$380] = $80 xor $03
+    LD A,$180,X
+    JSR T_V8
+    .BYTE $83
+    LD X,#TB+$200                   ; 16-bit negative: TB[$080] = $80
+    LD A,-$180,X
+    JSR T_V8
+    .BYTE $80
+    LD X,#TB+$200                   ; 24-bit offset wraps: X + $FFFF00 = TB[$100] = $00 xor $01
+    LD A,$FFFF00,X
+    JSR T_V8
+    .BYTE $01
+    LD Y,#TB+$300                   ; Y as the base: TB[$307] = $07 xor $03
+    LD A,7,Y
+    JSR T_V8
+    .BYTE $04
+    LD X,#TB+$200                   ; LD D reads low byte first: $03 at $201, $02 at $200
+    LD D,0,X
+    JSR T_V16
+    .WORD $0302
+    LD X,#TB+$200                   ; LD Q: bytes $02 $03 $00 $01
+    LD Q,0,X
+    JSR T_V32
+    .LONG $01000302
+    LD X,#TB+$200                   ; odd address word: $201, $202 = $03, $00
+    LD W,1,X
+    MOV D,W
+    JSR T_V16
+    .WORD $0003
+
+    LD Y,#TB+$300                   ; ST indexed, read back absolute
+    LD A,#$5A
+    ST A,3,Y
+    LD A,TB+$303
+    JSR T_V8
+    .BYTE $5A
+    LD Y,#TB+$300                   ; ST D writes the low byte first
+    LD D,#$1234
+    ST D,0,Y
+    LD A,TB+$300
+    JSR T_V8
+    .BYTE $34
+    LD Y,#TB+$300                   ; ST Q: $AABBCCDD puts $AA last, at +7
+    LD Q,#$AABBCCDD
+    ST Q,4,Y
+    LD A,TB+$307
+    JSR T_V8
+    .BYTE $AA
+
+    LD A,#$C3                       ; direct page: DP = $E0 reaches $00E000-$00E03F
+    ST A,DPBUF+$10
+    LD A,#DPPAGE
+    MOV DP,A
+    LD A,<$10
+    JSR T_V8
+    .BYTE $C3
+    LD A,#DPPAGE
+    MOV DP,A
+    LD B,#$77
+    ST B,<$11
+    LD A,DPBUF+$11
+    JSR T_V8
+    .BYTE $77
+    LD A,#DPPAGE                    ; LD D from the page, low byte first
+    MOV DP,A
+    LD D,<$10
+    JSR T_V16
+    .WORD $77C3
+    CLR A
+    MOV DP,A
+
+    LD X,#TB+$200                   ; LEA X,5,X
+    LEA X,5,X
+    MOV Q,X
+    JSR T_V32
+    .LONG TB+$205
+    LD X,#TB+$200                   ; LEA X,-$300,X
+    LEA X,-$300,X
+    MOV Q,X
+    JSR T_V32
+    .LONG TB-$100
+    LD Y,#TB                        ; LEA Y,$10,Y
+    LEA Y,$10,Y
+    MOV Q,Y
+    JSR T_V32
+    .LONG TB+$10
+
+    LD X,#$000100                   ; SMODX X,A sign-extends: $100 + -1 = $0FF
+    LD A,#$FF
+    SMODX X,A
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $000000FF
+    JSR T_FL
+    .BYTE 0, M_NZV
+    LD X,#1                         ; SMODX X,#-2: 1 - 2 = $FFFFFF -> N at 24 bits
+    SMODX X,#-2
+    PUSH CC
+    MOV Q,X
+    JSR T_V32
+    .LONG $00FFFFFF
+    JSR T_FL
+    .BYTE FL_N, M_NZV
+    LD X,#$010000                   ; SMODX X,D with D = $8000 = -32768
+    LD D,#$8000
+    SMODX X,D
+    MOV Q,X
+    JSR T_V32
+    .LONG $00008000
+    LD X,#$10                       ; SMODX X,Q uses Q's low 24 bits: $FFFFFE = -2
+    LD Q,#$00FFFFFE
+    SMODX X,Q
+    MOV Q,X
+    JSR T_V32
+    .LONG $0000000E
+
+    LD A,#$FF                       ; ADDZ $FF + 1 = 0 -> H, Z, C
+    ST A,TB
+    ADDZ TB,#1
+    PUSH CC
+    LD A,TB
+    JSR T_F8
+    .BYTE $00, FL_H|FL_Z|FL_C, M_HNZVC
+    LD A,#$7F                       ; ADDZ $7F + $10 = $8F -> N, V
+    ST A,TB
+    ADDZ TB,#$10
+    PUSH CC
+    LD A,TB
+    JSR T_F8
+    .BYTE $8F, FL_N|FL_V, M_HNZVC
+    RTS
+
+; branches: every condition against all 16 N Z V C patterns
+; BR_SHORT / BR_LONG take A = the N Z V C pattern and return D = a bit per branch taken:
+; bit 0 BRA, 1 BRN, 2 BEQ, 3 BNE, 4 BCC, 5 BCS, 6 BHI, 7 BLS, 8 BGE, 9 BLT, 10 BGT,
+; 11 BLE, 12 BMI, 13 BPL, 14 BVS, 15 BVC. Expected words worked out from the rules.
+CPU_BRANCHES:
+    JSR T_SECT
+    .BYTE "BRANCHES", 0
+    LD A,#$0
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $A559
+    LD A,#$1
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $A5A9
+    LD A,#$2
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $6A59
+    LD A,#$3
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $6AA9
+    LD A,#$4
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $A995
+    LD A,#$5
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $A9A5
+    LD A,#$6
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $6A95
+    LD A,#$7
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $6AA5
+    LD A,#$8
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $9A59
+    LD A,#$9
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $9AA9
+    LD A,#$A
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $5559
+    LD A,#$B
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $55A9
+    LD A,#$C
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $9A95
+    LD A,#$D
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $9AA5
+    LD A,#$E
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $5995
+    LD A,#$F
+    JSR BR_SHORT
+    JSR T_V16
+    .WORD $59A5
+
+    JSR T_SECT
+    .BYTE "LONG BRANCHES", 0
+    LD A,#$0
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $A559
+    LD A,#$3
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $6AA9
+    LD A,#$5
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $A9A5
+    LD A,#$6
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $6A95
+    LD A,#$9
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $9AA9
+    LD A,#$A
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $5559
+    LD A,#$C
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $9A95
+    LD A,#$F
+    JSR BR_LONG
+    JSR T_V16
+    .WORD $59A5
+
+    CLR B                           ; a long branch over 300 bytes lands
+    LBRA .FAR
+    .DS 300
+.FAR:
+    LD B,#1
+    MOV A,B
+    JSR T_V8
+    .BYTE 1
+
+    CLR B                           ; a short-looking BEQ the assembler stretches over 200 bytes
+    LD A,#0
+    BEQ .FAR2
+    .DS 200
+.FAR2:
+    LD B,#1
+    MOV A,B
+    JSR T_V8
+    .BYTE 1
+
+    JSR T_SECT
+    .BYTE "LOOPS AND BIT BRANCHES", 0
+    LD B,#5                         ; DBNZ B runs the body 5 times, ends with B = 0 and Z
+    CLR A
+.L1:
+    INC A
+    DBNZ B,.L1
+    PUSH CC
+    JSR T_F8
+    .BYTE 5, FL_Z, M_NZ
+    LD W,#$0100                     ; DBNZ W counts 16 bits: 256 times
+    LD D,#0
+.L2:
+    INC D
+    DBNZ W,.L2
+    JSR T_V16
+    .WORD $0100
+
+    LD A,#$04                       ; TBNZ A,#2 is taken
+    CLR B
+    TBNZ A,#2,.T1
+    BRA .N1
+.T1:
+    LD B,#1
+.N1:
+    MOV A,B
+    JSR T_V8
+    .BYTE 1
+    LD A,#$04                       ; TBZ A,#2 is not taken
+    CLR B
+    TBZ A,#2,.T2
+    BRA .N2
+.T2:
+    LD B,#1
+.N2:
+    MOV A,B
+    JSR T_V8
+    .BYTE 0
+    LD D,#$7FFF                     ; TBZ D,#15 is taken
+    CLR GP
+    TBZ D,#15,.T3
+    BRA .N3
+.T3:
+    MOV GP,#1
+.N3:
+    MOV A,GP
+    JSR T_V8
+    .BYTE 1
+    LD A,#$80                       ; JBS on memory bit 7 of $80 is taken
+    ST A,TB
+    CLR B
+    JBS TB,#7,.T4
+    BRA .N4
+.T4:
+    LD B,#1
+.N4:
+    MOV A,B
+    JSR T_V8
+    .BYTE 1
+    CLR B                           ; JBC on bit 7 of $80 is not taken
+    JBC TB,#7,.T5
+    BRA .N5
+.T5:
+    LD B,#1
+.N5:
+    MOV A,B
+    JSR T_V8
+    .BYTE 0
+    CLR B                           ; JBC on bit 0 of $80 is taken
+    JBC TB,#0,.T6
+    BRA .N6
+.T6:
+    LD B,#1
+.N6:
+    MOV A,B
+    JSR T_V8
+    .BYTE 1
+
+    JSR T_SECT
+    .BYTE "CALLS", 0
+    JSR CAPTURE_RA                  ; JSR pushes the address of the next instruction
+RA_JSR:
+    LD Q,RA_GOT
+    JSR T_V32
+    .LONG RA_JSR
+    BSR CAPTURE_RA                  ; so does BSR
+RA_BSR:
+    LD Q,RA_GOT
+    JSR T_V32
+    .LONG RA_BSR
+    LBSR CAPTURE_RA                 ; and LBSR
+RA_LBSR:
+    LD Q,RA_GOT
+    JSR T_V32
+    .LONG RA_LBSR
+    MOV Q,SP                        ; a JSR/RTS pair leaves SP where it was
+    ST Q,SP0
+    JSR CAPTURE_RA
+    MOV Q,SP
+    SUB Q,SP0
+    JSR T_V32
+    .LONG 0
+    RTS
+
+CAPTURE_RA:
+    MOV X,SP
+    LD Q,0,X
+    AND Q,#$00FFFFFF
+    ST Q,RA_GOT
+    RTS
+
+BR_SHORT:
+    MOV GP,A
+    OR GP,#$50                      ; keep the interrupt masks
+    LD W,#0
+    MOV CC,GP
+    BRA .Y0
+    BRA .N0
+.Y0:
+    OR W,#$0001
+.N0:
+    MOV CC,GP
+    BRN .Y1
+    BRA .N1
+.Y1:
+    OR W,#$0002
+.N1:
+    MOV CC,GP
+    BEQ .Y2
+    BRA .N2
+.Y2:
+    OR W,#$0004
+.N2:
+    MOV CC,GP
+    BNE .Y3
+    BRA .N3
+.Y3:
+    OR W,#$0008
+.N3:
+    MOV CC,GP
+    BCC .Y4
+    BRA .N4
+.Y4:
+    OR W,#$0010
+.N4:
+    MOV CC,GP
+    BCS .Y5
+    BRA .N5
+.Y5:
+    OR W,#$0020
+.N5:
+    MOV CC,GP
+    BHI .Y6
+    BRA .N6
+.Y6:
+    OR W,#$0040
+.N6:
+    MOV CC,GP
+    BLS .Y7
+    BRA .N7
+.Y7:
+    OR W,#$0080
+.N7:
+    MOV CC,GP
+    BGE .Y8
+    BRA .N8
+.Y8:
+    OR W,#$0100
+.N8:
+    MOV CC,GP
+    BLT .Y9
+    BRA .N9
+.Y9:
+    OR W,#$0200
+.N9:
+    MOV CC,GP
+    BGT .YA
+    BRA .NA
+.YA:
+    OR W,#$0400
+.NA:
+    MOV CC,GP
+    BLE .YB
+    BRA .NB
+.YB:
+    OR W,#$0800
+.NB:
+    MOV CC,GP
+    BMI .YC
+    BRA .NC
+.YC:
+    OR W,#$1000
+.NC:
+    MOV CC,GP
+    BPL .YD
+    BRA .ND
+.YD:
+    OR W,#$2000
+.ND:
+    MOV CC,GP
+    BVS .YE
+    BRA .NE
+.YE:
+    OR W,#$4000
+.NE:
+    MOV CC,GP
+    BVC .YF
+    BRA .NF
+.YF:
+    OR W,#$8000
+.NF:
+    MOV D,W
+    RTS
+
+BR_LONG:
+    MOV GP,A
+    OR GP,#$50
+    LD W,#0
+    MOV CC,GP
+    LBRA .Y0
+    BRA .N0
+.Y0:
+    OR W,#$0001
+.N0:
+    MOV CC,GP
+    LBEQ .Y2
+    BRA .N2
+.Y2:
+    OR W,#$0004
+.N2:
+    MOV CC,GP
+    LBNE .Y3
+    BRA .N3
+.Y3:
+    OR W,#$0008
+.N3:
+    MOV CC,GP
+    LBCC .Y4
+    BRA .N4
+.Y4:
+    OR W,#$0010
+.N4:
+    MOV CC,GP
+    LBCS .Y5
+    BRA .N5
+.Y5:
+    OR W,#$0020
+.N5:
+    MOV CC,GP
+    LBHI .Y6
+    BRA .N6
+.Y6:
+    OR W,#$0040
+.N6:
+    MOV CC,GP
+    LBLS .Y7
+    BRA .N7
+.Y7:
+    OR W,#$0080
+.N7:
+    MOV CC,GP
+    LBGE .Y8
+    BRA .N8
+.Y8:
+    OR W,#$0100
+.N8:
+    MOV CC,GP
+    LBLT .Y9
+    BRA .N9
+.Y9:
+    OR W,#$0200
+.N9:
+    MOV CC,GP
+    LBGT .YA
+    BRA .NA
+.YA:
+    OR W,#$0400
+.NA:
+    MOV CC,GP
+    LBLE .YB
+    BRA .NB
+.YB:
+    OR W,#$0800
+.NB:
+    MOV CC,GP
+    LBMI .YC
+    BRA .NC
+.YC:
+    OR W,#$1000
+.NC:
+    MOV CC,GP
+    LBPL .YD
+    BRA .ND
+.YD:
+    OR W,#$2000
+.ND:
+    MOV CC,GP
+    LBVS .YE
+    BRA .NE
+.YE:
+    OR W,#$4000
+.NE:
+    MOV CC,GP
+    LBVC .YF
+    BRA .NF
+.YF:
+    OR W,#$8000
+.NF:
+    MOV D,W
+    RTS
+
+; the stack: sizes, byte order, pairs and flag registers
+CPU_STACK:
+    JSR T_SECT
+    .BYTE "STACK", 0
+    MOV Q,SP                        ; PUSH A moves SP down 1
+    ST Q,SP0
+    PUSH A
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP A
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -1
+    MOV Q,SP                        ; PUSH D: 2
+    ST Q,SP0
+    PUSH D
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP D
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -2
+    MOV Q,SP                        ; PUSH X: 3
+    ST Q,SP0
+    PUSH X
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP X
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -3
+    MOV Q,SP                        ; PUSH Q: 4
+    ST Q,SP0
+    PUSH Q
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP Q
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -4
+    MOV Q,SP                        ; PUSH CC: 1
+    ST Q,SP0
+    PUSH CC
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP CC
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -1
+    MOV Q,SP                        ; PUSH2 X,D: 5
+    ST Q,SP0
+    PUSH2 X,D
+    MOV Q,SP
+    SUB Q,SP0
+    ST Q,SDIFF
+    POP2 X,D
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG -5
+
+    LD D,#$1234                     ; PUSH D puts the low byte at the lower address
+    PUSH D
+    MOV X,SP
+    LD A,0,X
+    ST A,TB
+    LD A,1,X
+    ST A,TB+1
+    POP D
+    LD A,TB
+    JSR T_V8
+    .BYTE $34
+    LD A,TB+1
+    JSR T_V8
+    .BYTE $12
+    LD X,#$ABCDEF                   ; PUSH X: three bytes, low first
+    PUSH X
+    MOV X,SP
+    LD Q,0,X
+    ST Q,TB
+    POP X
+    LD Q,TB
+    AND Q,#$00FFFFFF
+    JSR T_V32
+    .LONG $00ABCDEF
+
+    LD A,#$11                       ; PUSH2 A,B then POP2 A,B gets both back
+    LD B,#$22
+    PUSH2 A,B
+    LD D,#0
+    POP2 A,B
+    JSR T_V16
+    .WORD $1122
+    LD X,#$345678                   ; PUSH2 X,D then POP2 X,D, mixed widths
+    LD D,#$9ABC
+    PUSH2 X,D
+    LD X,#0
+    LD D,#0
+    POP2 X,D
+    ST D,TB+4
+    MOV Q,X
+    ST Q,TB
+    LD D,TB+4
+    JSR T_V16
+    .WORD $9ABC
+    LD Q,TB
+    JSR T_V32
+    .LONG $00345678
+
+    LD A,#$5F                       ; POP CC restores the flags pushed
+    MOV CC,A
+    PUSH CC
+    LD A,#$50
+    MOV CC,A
+    POP CC
+    PUSH CC
+    JSR T_FL
+    .BYTE $0F, M_NZVC
+    LD A,#$5A                       ; PUSH DP / POP DP
+    MOV DP,A
+    PUSH DP
+    CLR A
+    MOV DP,A
+    POP DP
+    MOV A,DP
+    PUSH A
+    CLR A
+    MOV DP,A
+    POP A
+    JSR T_V8
+    .BYTE $5A
+    RTS
+
+; block moves, fills, compares and scans
+CPU_BLOCK:
+    JSR T_SECT
+    .BYTE "BLOCK OPS", 0
+    LD X,#BS                        ; BS = 1..64, BD = 0
+    LD A,#1
+.SRC:
+    ST A,0,X
+    LEA X,1,X
+    INC A
+    CMP A,#65
+    BNE .SRC
+    LD X,#BD
+    FILL [X],#0,#64
+
+    LD X,#BD                        ; FILL 4 words of $A55A: $5A $A5 x4, X moves 8
+    FILL [X],#$A55A,#4
+    MOV Q,X
+    ST Q,SDIFF
+    LD A,BD
+    JSR T_V8
+    .BYTE $5A
+    LD A,BD+7
+    JSR T_V8
+    .BYTE $A5
+    LD A,BD+8
+    JSR T_V8
+    .BYTE $00
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BD+8
+
+    LD X,#BS                        ; MOVB 5 bytes, X and Y move 5
+    LD Y,#BD+16
+    MOVB [X],[Y],#5
+    MOV Q,Y
+    ST Q,SDIFF
+    MOV Q,X
+    ST Q,SP0
+    LD A,BD+16
+    JSR T_V8
+    .BYTE 1
+    LD A,BD+20
+    JSR T_V8
+    .BYTE 5
+    LD A,BD+21
+    JSR T_V8
+    .BYTE 0
+    LD Q,SP0
+    JSR T_V32
+    .LONG BS+5
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BD+21
+
+    LD X,#BS                        ; MOVW 3 words = 6 bytes, X and Y move 6
+    LD Y,#BD+32
+    MOVW [X],[Y],#3
+    MOV Q,Y
+    ST Q,SDIFF
+    LD A,BD+37
+    JSR T_V8
+    .BYTE 6
+    LD A,BD+38
+    JSR T_V8
+    .BYTE 0
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BD+38
+
+    LD X,#BS                        ; MOVB 0 copies nothing and leaves X
+    LD Y,#BD+48
+    MOVB [X],[Y],#0
+    MOV Q,X
+    ST Q,SDIFF
+    LD A,BD+48
+    JSR T_V8
+    .BYTE 0
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BS
+
+    LD X,#BIG                       ; MOVB 300 (the 16-bit count form)
+    FILL [X],#$1234,#256
+    LD X,#BIG2
+    FILL [X],#0,#256
+    LD X,#BIG
+    LD Y,#BIG2
+    MOVB [X],[Y],#300
+    LD A,BIG2+299                   ; odd byte of $1234 is $12
+    JSR T_V8
+    .BYTE $12
+    LD A,BIG2+300
+    JSR T_V8
+    .BYTE $00
+
+    LD X,#BS                        ; CPY 3 equal words -> Z, X moves 6
+    LD Y,#BD+32
+    CPY [X],[Y],#3
+    PUSH CC
+    MOV Q,X
+    ST Q,SDIFF
+    JSR T_FL
+    .BYTE FL_Z, FL_Z
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BS+6
+
+    LD X,#BS                        ; CPY stops at the third word ($0605 vs $0005), X on it
+    LD Y,#BD+16
+    CPY [X],[Y],#4
+    PUSH CC
+    MOV Q,X
+    ST Q,SDIFF
+    JSR T_FL
+    .BYTE 0, M_NZVC
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BS+4
+
+    LD X,#BS                        ; CPY of 0 words -> Z
+    LD Y,#BD
+    LD A,#1
+    CPY [X],[Y],#0
+    PUSH CC
+    JSR T_FL
+    .BYTE FL_Z, FL_Z
+
+    LD X,#BS                        ; SCNB finds 7 at BS+6: Z and C, X on it
+    SCNB [X],#7,#64
+    PUSH CC
+    MOV Q,X
+    ST Q,SDIFF
+    JSR T_FL
+    .BYTE FL_Z|FL_C, FL_Z|FL_C|FL_V
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BS+6
+
+    LD X,#BS                        ; SCNB doesn't find $FF: Z0 C0, X past the block
+    SCNB [X],#$FF,#64
+    PUSH CC
+    MOV Q,X
+    ST Q,SDIFF
+    JSR T_FL
+    .BYTE 0, FL_Z|FL_C|FL_V
+    LD Q,SDIFF
+    JSR T_V32
+    .LONG BS+64
+    RTS
+
+RA_GOT:     .LONG 0
+SP0:        .LONG 0
+SDIFF:      .LONG 0

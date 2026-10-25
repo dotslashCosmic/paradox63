@@ -135,77 +135,82 @@ fn bg_pixel(mem: &[u8], regs: &Regs, bg: Bg, x: u32, y: u32) -> (u8, u8, bool) {
     (tile_pixel(mem, tile, tx, ty), palette, priority)
 }
 
-/// Draws one frame into `frame` (`WIDTH * HEIGHT` pixels of 0x00RRGGBB).
-/// `mem` is the full 16 MB address space. Returns true if any line had too many sprites.
+/// Draws one frame into `frame` (`WIDTH * HEIGHT` pixels of 0x00RRGGBB) with the
+/// same registers for every line. `mem` is the full 16 MB address space.
+/// Returns true if any line had too many sprites.
 pub fn render(mem: &[u8], regs: Regs, frame: &mut [u32]) -> bool {
+    (0..HEIGHT).fold(false, |overflow, line| render_line(mem, regs, line, frame) | overflow)
+}
+
+/// Draws one line of `frame` from VRAM, OAM and the registers as they are now.
+/// Returns true if the line had too many sprites.
+pub fn render_line(mem: &[u8], regs: Regs, line: usize, frame: &mut [u32]) -> bool {
     let palette = |p: u8, c: u8| mem[(spec::VRAM_PALETTE + u32::from(p) * 16 + u32::from(c)) as usize];
+    let out = &mut frame[line * WIDTH..(line + 1) * WIDTH];
     if regs.ctrl & CTRL_ENABLE == 0 {
-        frame.fill(0);
+        out.fill(0);
         return false;
     }
-    let sprites: Vec<Sprite> = if regs.ctrl & CTRL_SPRITES == 0 {
+    let line = line as i32;
+    let on_line: Vec<Sprite> = if regs.ctrl & CTRL_SPRITES == 0 {
         Vec::new()
     } else {
         let oam = &mem[spec::OAM_BASE as usize..=spec::OAM_END as usize];
-        oam.chunks(spec::SPR_SIZE as usize).filter_map(sprite).collect()
+        oam.chunks(spec::SPR_SIZE as usize)
+            .filter_map(sprite)
+            .filter(|s| (s.y..s.y + s.h as i32 * 8).contains(&line))
+            .collect()
     };
+    let overflow = on_line.len() > SPRITES_PER_LINE;
 
-    let mut overflow = false;
     // sprite line buffers as RGB332, split by priority
     let mut low = [None::<u8>; WIDTH];
     let mut high = [None::<u8>; WIDTH];
-    for line in 0..HEIGHT as i32 {
-        low.fill(None);
-        high.fill(None);
-        let on_line: Vec<&Sprite> =
-            sprites.iter().filter(|s| (s.y..s.y + s.h as i32 * 8).contains(&line)).collect();
-        overflow |= on_line.len() > SPRITES_PER_LINE;
-        // lowest OAM index ends up on top
-        for s in on_line.iter().take(SPRITES_PER_LINE).rev() {
-            let buf = if s.low { &mut low } else { &mut high };
-            let sy = (line - s.y) as u32;
-            for sx in 0..s.w * 8 {
-                let x = s.x + sx as i32;
-                if !(0..WIDTH as i32).contains(&x) {
-                    continue;
-                }
-                let c = pixel(mem, s, sx, sy);
-                if c != 0 {
-                    buf[x as usize] = Some(palette(s.palette, c));
-                }
+    // lowest OAM index ends up on top
+    for s in on_line.iter().take(SPRITES_PER_LINE).rev() {
+        let buf = if s.low { &mut low } else { &mut high };
+        let sy = (line - s.y) as u32;
+        for sx in 0..s.w * 8 {
+            let x = s.x + sx as i32;
+            if !(0..WIDTH as i32).contains(&x) {
+                continue;
+            }
+            let c = pixel(mem, s, sx, sy);
+            if c != 0 {
+                buf[x as usize] = Some(palette(s.palette, c));
             }
         }
+    }
 
-        let y = line as u32;
-        for x in 0..WIDTH {
-            let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg2, x as u32, y);
-            let mut out = palette(p, c);
-            if regs.ctrl & CTRL_BG1 != 0 {
-                let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg1, x as u32, y);
-                if c != 0 {
-                    out = palette(p, c);
-                }
+    let y = line as u32;
+    for (x, px) in out.iter_mut().enumerate() {
+        let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg2, x as u32, y);
+        let mut colour = palette(p, c);
+        if regs.ctrl & CTRL_BG1 != 0 {
+            let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg1, x as u32, y);
+            if c != 0 {
+                colour = palette(p, c);
             }
-            let bg0 = if regs.ctrl & CTRL_BG0 == 0 {
-                None
-            } else {
-                let (c, p, prio) = bg_pixel(mem, &regs, Bg::Bg0, x as u32, y);
-                (c != 0).then(|| (palette(p, c), prio))
-            };
-            if let Some((c, false)) = bg0 {
-                out = c;
-            }
-            if let Some(c) = low[x] {
-                out = c;
-            }
-            if let Some((c, true)) = bg0 {
-                out = c;
-            }
-            if let Some(c) = high[x] {
-                out = c;
-            }
-            frame[line as usize * WIDTH + x] = rgb(out, regs.bright);
         }
+        let bg0 = if regs.ctrl & CTRL_BG0 == 0 {
+            None
+        } else {
+            let (c, p, prio) = bg_pixel(mem, &regs, Bg::Bg0, x as u32, y);
+            (c != 0).then(|| (palette(p, c), prio))
+        };
+        if let Some((c, false)) = bg0 {
+            colour = c;
+        }
+        if let Some(c) = low[x] {
+            colour = c;
+        }
+        if let Some((c, true)) = bg0 {
+            colour = c;
+        }
+        if let Some(c) = high[x] {
+            colour = c;
+        }
+        *px = rgb(colour, regs.bright);
     }
     overflow
 }

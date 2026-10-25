@@ -104,11 +104,46 @@ fn main() -> ExitCode {
     }
 }
 
-/// Where test ROMs leave their result (see games/tests/testlib.p63): status, kind, case, got, want.
+/// Where test ROMs leave their results (see games/tests/testlib.p63).
 const TEST_RESULT: u32 = 0x00F000;
+const TEST_LOG: u32 = TEST_RESULT + 0x10;
+const TEST_LOG_ENTRY: u32 = 16;
+/// Pure red ($E0) as drawn: on the PPU page any pixel of it is a bug.
+const ACID_RED: u32 = 0x00FF_0000;
+
+/// Little-endian value of `bytes` bytes at `addr`.
+fn peek(machine: &mut p63_bus::Machine, addr: u32, bytes: u32) -> u32 {
+    use p63_core::{Addr, Bus};
+    (0..bytes).fold(0, |v, i| v | u32::from(machine.cpu.bus.read(Addr::new(addr + i))) << (8 * i))
+}
+
+/// Zero-terminated text at `addr`, up to 40 characters.
+fn peek_text(machine: &mut p63_bus::Machine, addr: u32) -> String {
+    (0..40)
+        .map(|i| peek(machine, addr + i, 1) as u8)
+        .take_while(|&c| c != 0)
+        .map(char::from)
+        .collect()
+}
+
+/// One logged failure: `#n SECTION: what was wrong`.
+fn describe_failure(machine: &mut p63_bus::Machine, entry: u32) -> String {
+    let at = TEST_LOG + entry * TEST_LOG_ENTRY;
+    let num = peek(machine, at, 2);
+    let kind = peek(machine, at + 2, 1);
+    let digits = peek(machine, at + 3, 1).clamp(1, 4) as usize * 2;
+    let (got, want) = (peek(machine, at + 4, 4), peek(machine, at + 8, 4));
+    let section = peek(machine, at + 12, 3);
+    let section = peek_text(machine, section);
+    let what = match kind {
+        2 => format!("flags ${got:02X}, want ${want:02X}"),
+        3 => format!("${got:02X} not in ${:02X}-${:02X}", want & 0xFF, want >> 8),
+        _ => format!("${got:0digits$X}, want ${want:0digits$X}"),
+    };
+    format!("#{num} {section}: {what}")
+}
 
 fn test(files: &[PathBuf], frames: u64) -> Result<(), String> {
-    use p63_core::{Addr, Bus};
     let mut failed = 0;
     for file in files {
         let name = file.display();
@@ -116,27 +151,54 @@ fn test(files: &[PathBuf], frames: u64) -> Result<(), String> {
         let mut status = 0;
         for _ in 0..frames {
             machine.run_frame().map_err(|e| format!("{name}: at ${:06X}: {e}", machine.cpu.registers.pc()))?;
-            status = machine.cpu.bus.read(Addr::new(TEST_RESULT));
+            status = peek(&mut machine, TEST_RESULT, 1);
             if status != 0 {
                 break;
             }
         }
-        let mut word = |at: u32| {
-            u16::from(machine.cpu.bus.read(Addr::new(TEST_RESULT + at)))
-                | u16::from(machine.cpu.bus.read(Addr::new(TEST_RESULT + at + 1))) << 8
-        };
-        let (num, got, want) = (word(2), word(4), word(6));
+        let checks = peek(&mut machine, TEST_RESULT + 2, 2);
+        let fails = peek(&mut machine, TEST_RESULT + 4, 2);
+        let logged = peek(&mut machine, TEST_RESULT + 6, 1);
+        let mut ok = true;
         match status {
-            1 => println!("PASS  {name} ({num} cases)"),
+            1 => println!("PASS  {name} ({checks} checks)"),
             2 => {
-                let kind = if machine.cpu.bus.read(Addr::new(TEST_RESULT + 1)) == 2 { "flags" } else { "value" };
-                println!("FAIL  {name}: case {num}, {kind} ${got:04X}, want ${want:04X}");
-                failed += 1;
+                println!("FAIL  {name}: {fails} of {checks} checks failed");
+                for entry in 0..logged {
+                    println!("  {}", describe_failure(&mut machine, entry));
+                }
+                if fails > logged {
+                    println!("  ({} more not logged)", fails - logged);
+                }
+                ok = false;
             }
             _ => {
-                println!("FAIL  {name}: no result after {frames} frames (stopped in case {num})");
-                failed += 1;
+                println!("FAIL  {name}: no result after {frames} frames ({checks} checks run)");
+                ok = false;
             }
+        }
+        if peek(&mut machine, TEST_RESULT + 1, 1) == 1 {
+            // let the last screen settle, then look for red
+            for _ in 0..2 {
+                machine.run_frame().map_err(|e| format!("{name}: {e}"))?;
+            }
+            let width = p63_ppu::WIDTH;
+            let red: Vec<usize> = (0..machine.frame.len()).filter(|&i| machine.frame[i] == ACID_RED).collect();
+            if red.is_empty() {
+                println!("PASS  {name}: PPU page has no red");
+            } else {
+                let mut tiles: Vec<(usize, usize)> = red.iter().map(|&i| (i % width / 8, i / width / 8)).collect();
+                tiles.dedup();
+                tiles.sort_unstable();
+                tiles.dedup();
+                let shown: Vec<String> = tiles.iter().take(24).map(|(x, y)| format!("{x},{y}")).collect();
+                let more = if tiles.len() > shown.len() { format!(" (+{} more)", tiles.len() - shown.len()) } else { String::new() };
+                println!("FAIL  {name}: PPU page has {} red pixels in tiles {}{more}", red.len(), shown.join(" "));
+                ok = false;
+            }
+        }
+        if !ok {
+            failed += 1;
         }
     }
     if failed == 0 {

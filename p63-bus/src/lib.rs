@@ -144,16 +144,20 @@ impl Machine {
     }
 
     /// Runs one frame: 262 lines of 455 CPU cycles, with vertical blank at line 240.
+    /// Each visible line is drawn as it starts, so changes made during the frame show
+    /// from the next line on.
     pub fn run_frame(&mut self) -> Result<(), CpuError> {
         self.audio.clear();
         for line in 0..spec::LINES_PER_FRAME as u16 {
             self.cpu.bus.video.start_line(line);
-            if line == spec::SCREEN_H as u16 {
-                self.render();
+            if usize::from(line) < p63_ppu::HEIGHT {
+                self.render_line(usize::from(line));
+            } else if line == spec::SCREEN_H as u16 {
                 self.cpu.signal_vblank();
             }
             let mut spent = self.debt;
             while spent < CYCLES_PER_LINE {
+                self.cpu.bus.video.dot = spent;
                 self.cpu.set_irq_pending(self.cpu.bus.video.irq());
                 self.cpu.set_firq_pending(self.cpu.bus.audio.firq());
                 let cycles = self.cpu.step()?.0;
@@ -171,8 +175,8 @@ impl Machine {
         Ok(())
     }
 
-    /// Draws the picture from VRAM and OAM as they stand now.
-    fn render(&mut self) {
+    /// Draws one line from VRAM, OAM and the registers as they stand now.
+    fn render_line(&mut self, line: usize) {
         let video = &self.cpu.bus.video;
         let word = |a: u32| u16::from_le_bytes([video.register(a), video.register(a + 1)]);
         let regs = p63_ppu::Regs {
@@ -185,12 +189,8 @@ impl Machine {
             bank: video.register(spec::V_BANK),
             palgrp: video.register(spec::V_PALGRP),
         };
-        let overflow = p63_ppu::render(self.cpu.bus.memory(), regs, &mut self.frame);
-        let video = &mut self.cpu.bus.video;
-        if overflow {
-            video.stat |= p63_ppu::STAT_OVERFLOW;
-        } else {
-            video.stat &= !p63_ppu::STAT_OVERFLOW;
+        if p63_ppu::render_line(self.cpu.bus.memory(), regs, line, &mut self.frame) {
+            self.cpu.bus.video.stat |= p63_ppu::STAT_OVERFLOW;
         }
     }
 }

@@ -1,0 +1,38 @@
+; p63test.p63 - the P63 test ROM: CPU, memory map, interrupts, timing, audio and video
+; Every expected value is worked out by hand in the comments.
+; A failing check is logged and the ROM keeps going; the last screen is the PPU page,
+; where any pure red pixel is a bug.
+; Run: p63-sim test games/tests/p63test.p63   (or play it to watch)
+
+INCLUDE "../p63_hw.inc"
+
+; scratch memory (main RAM, well above the program)
+TB          EQU $100000             ; 1 KB of test data
+BS          EQU $101000             ; block op source, 64 bytes of 1..64
+BD          EQU $101100             ; block op destination
+BIG         EQU $102000             ; big copies
+BIG2        EQU $106000
+DPPAGE      EQU $00E0               ; direct page tests use $00E000-$00E03F
+DPBUF       EQU DPPAGE<<8
+
+ORG $000100
+
+START:
+    LD X,#NAME
+    JSR T_INIT
+    JSR CPU_TESTS
+    JSR SYS_TESTS
+    JSR PPU_TESTS                   ; ends on the PPU page
+.HALT:
+    WAIT                            ; not WAITV: the page's raster IRQ has to run
+    BRA .HALT
+
+NAME:       .BYTE "P63 TEST ROM", 0
+
+INCLUDE "t_cpu.p63"
+INCLUDE "t_sys.p63"
+INCLUDE "t_ppu.p63"
+INCLUDE "testlib.p63"
+INCLUDE "font.p63"
+INCLUDE "acid_gfx.p63"
+PROGRAM_END:

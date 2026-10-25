@@ -1,69 +1,75 @@
-; testlib.p63 - shared harness for the P63 test ROMs
+; testlib.p63 - shared harness for the P63 test ROM
 ; Needs: INCLUDE "p63_hw.inc" before this file, and font.p63 somewhere after it
 ;
-; A test ROM calls T_INIT with X = its name, then for each case:
-;   JSR T_CASE                  ; next case number
-;   ...set up, run the instruction under test...
-;   PUSH CC                     ; catch the flags before anything else touches them
-;   (move the result into A, or D for 16 bits)
-;   LD B,#want / LD W,#want
-;   JSR T_CHECK8 / T_CHECK16    ; stops the ROM if the value is wrong
-;   POP A                       ; the caught flags
-;   LD B,#want
-;   LD E,#mask                  ; only the flags the instruction defines
-;   JSR T_FLAGS
-; and finally JMP T_PASS.
+; Start with JSR T_INIT (X = the ROM's name), then name each group of checks:
+;   JSR T_SECT
+;   .BYTE "SHIFTS", 0
+; A check runs the instruction, catches the flags if it needs them, and passes the
+; expected values inline after the JSR:
+;   LD A,#$7F
+;   ADD A,#$01
+;   PUSH CC                     ; flags first, before anything else touches them
+;   JSR T_F8                    ; A = result
+;   .BYTE $80, FL_H|FL_N|FL_V, M_HNZVC      ; want, flags, mask of the flags to compare
+; Checks:
+;   T_V8   A = got              .BYTE want
+;   T_V16  D = got              .WORD want
+;   T_V32  Q = got              .LONG want
+;   T_F8   A = got, CC pushed   .BYTE want, flags, mask
+;   T_F16  D = got, CC pushed   .WORD want / .BYTE flags, mask
+;   T_FL   CC pushed            .BYTE flags, mask
+;   T_R8   A = got              .BYTE low, high (inclusive range)
+; A failing check is logged and the ROM carries on. Finish with JSR T_FINISH.
 ;
 ; Results, for p63-sim test and anyone peeking at memory:
-;   T_STATUS  $00F000  0 running, 1 passed, 2 failed
-;   T_KIND    $00F001  on failure: 1 value, 2 flags
-;   T_NUM     $00F002  word: cases run, or the failing case
-;   T_GOT     $00F004  word: what the failing case got
-;   T_WANT    $00F006  word: what it should have got
-; On screen: green PASS with the case count, or red FAIL with case, got and want
+;   T_STATUS  $00F000  0 running, 1 all passed, 2 something failed
+;   T_ACID    $00F001  1 = the PPU page is up: any pure red pixel on screen is a bug
+;   T_NUM     $00F002  word: checks run
+;   T_FAILS   $00F004  word: checks failed
+;   T_LOGN    $00F006  entries in the log (up to 16)
+;   T_LOG     $00F010  16 entries of 16 bytes: +0 check number (word), +2 kind
+;                      (1 value, 2 flags, 3 range), +3 width in bytes, +4 got (4),
+;                      +8 want (4; a range is low + high << 8), +12 section name address (3)
 
 T_STATUS    EQU $00F000
-T_KIND      EQU $00F001
+T_ACID      EQU $00F001
 T_NUM       EQU $00F002
-T_GOT       EQU $00F004
-T_WANT      EQU $00F006
-
-T_RUNNING   EQU 0
-T_PASSED    EQU 1
-T_FAILED    EQU 2
+T_FAILS     EQU $00F004
+T_LOGN      EQU $00F006
+T_LOG       EQU $00F010
+T_LOG_MAX   EQU 16
 
 FL_C        EQU $01                 ; CC bits
 FL_V        EQU $02
 FL_Z        EQU $04
 FL_N        EQU $08
+FL_I        EQU $10
 FL_H        EQU $20
+FL_F        EQU $40
+FL_E        EQU $80
 M_NZ        EQU FL_N|FL_Z           ; masks: which flags an instruction defines
 M_NZV       EQU FL_N|FL_Z|FL_V
+M_NZC       EQU FL_N|FL_Z|FL_C
 M_NZVC      EQU FL_N|FL_Z|FL_V|FL_C
 M_HNZVC     EQU FL_H|FL_N|FL_Z|FL_V|FL_C
 
 T_ATTR      EQU 1<<3                ; BG0 palette 1
-T_ROW_NAME  EQU 3                   ; screen rows for each line of text
-T_ROW_STATE EQU 6
-T_ROW_CASE  EQU 8
-T_ROW_GOT   EQU 9
-T_ROW_WANT  EQU 10
+T_ROW_NAME  EQU 3                   ; screen rows for the running text
+T_ROW_SECT  EQU 6
+T_ROW_STATE EQU 8
 T_COL       EQU 4
 
 ; Set up the screen and the result block; X = the ROM's name (zero-terminated)
 T_INIT:
-    CLR A
-    ST A,T_STATUS
-    ST A,T_KIND
-    CLR D
-    ST D,T_NUM
-    ST D,T_GOT
-    ST D,T_WANT
     PUSH X
+    LD X,#T_STATUS                  ; clear the result block and the log
+    FILL [X],#0,#136
+    CLR A
+    ST A,T_QUIET
     LD X,#T_FONT                    ; font at tile 32, so tile = ASCII code
     LD Y,#VRAM_PATTERN+32*32
     MOVB [X],[Y],#T_FONT_END-T_FONT
-    LD A,#$25                       ; backdrop: charcoal while running
+    LD A,#$25                       ; backdrop: charcoal
     ST A,VRAM_PALETTE
     LD A,#$FF                       ; text: white
     ST A,VRAM_PALETTE+16+1
@@ -77,103 +83,229 @@ T_INIT:
     ST A,V_CTRL
     RTS
 
-; Next case
-T_CASE:
+; Name the checks that follow: the zero-terminated name follows the JSR
+T_SECT:
+    MOV Q,SP
+    ST Q,T_FRAME
+    MOV X,SP
+    LD Q,0,X
+    MOV Y,Q                         ; Y = the name
+    MOV Q,Y
+    ST Q,T_SECTP
+    LD A,T_QUIET
+    TST A
+    BNE .SKIP
+    LD X,#VRAM_BG0+T_ROW_SECT*80    ; blank the row, then print the name
+    FILL [X],#T_ATTR<<8|' ',#40
+    MOV X,Y
+    LD Y,#VRAM_BG0+(T_ROW_SECT*40+T_COL)*2
+    JSR T_PUTS
+    BRA .RET
+.SKIP:
+    MOV X,Y                         ; just find the end of the name
+    SCNB [X],#0,#255
+.RET:
+    LEA X,1,X                       ; return just past the 0
+    MOV Q,X
+    ST Q,T_TMPQ
+    LD Q,T_FRAME
+    MOV X,Q
+    LD Q,T_TMPQ
+    ST W,0,X
+    ST B,2,X
+    RTS
+
+; Value checks
+T_V8:
+    ZEXT A,Q
+    ST Q,T_GOTQ
+    LD A,#1
+    JSR T_ARGS
+    LD A,0,Y
+    ZEXT A,Q
+    BRA T_VALUE
+
+T_V16:
+    ZEXT D,Q
+    ST Q,T_GOTQ
+    LD A,#2
+    JSR T_ARGS
+    LD D,0,Y
+    ZEXT D,Q
+    BRA T_VALUE
+
+T_V32:
+    ST Q,T_GOTQ
+    LD A,#4
+    JSR T_ARGS
+    LD Q,0,Y
+T_VALUE:                            ; Q = want, T_GOTQ = got
+    ST Q,T_WANTQ
+    LD A,#1
+    ST A,T_KIND
+    JMP T_CHECK
+
+; Value and flags: CC was pushed just before the JSR
+T_F8:
+    ZEXT A,Q
+    ST Q,T_GOTQ
+    LD A,#3
+    JSR T_ARGS_CC
+    LD A,0,Y
+    ZEXT A,Q
+    ST Q,T_WANTQ
+    LD A,#1
+    ST A,T_WIDTH
+    ST A,T_KIND
+    JSR T_CHECK
+    LD Y,T_ARGP
+    LEA Y,1,Y
+    JMP T_FLAGCHK
+
+T_F16:
+    ZEXT D,Q
+    ST Q,T_GOTQ
+    LD A,#4
+    JSR T_ARGS_CC
+    LD D,0,Y
+    ZEXT D,Q
+    ST Q,T_WANTQ
+    LD A,#2
+    ST A,T_WIDTH
+    LD A,#1
+    ST A,T_KIND
+    JSR T_CHECK
+    LD Y,T_ARGP
+    LEA Y,2,Y
+    JMP T_FLAGCHK
+
+; Flags only: CC was pushed just before the JSR
+T_FL:
+    LD A,#2
+    JSR T_ARGS_CC
+T_FLAGCHK:                          ; Y = flags, mask; T_CC = the caught CC
+    LD A,T_CC
+    AND A,1,Y
+    ZEXT A,Q
+    ST Q,T_GOTQ
+    LD A,0,Y
+    ZEXT A,Q
+    ST Q,T_WANTQ
+    LD A,#1
+    ST A,T_WIDTH
+    LD A,#2
+    ST A,T_KIND
+    JMP T_CHECK
+
+; Range check: A = got, .BYTE low, high
+T_R8:
+    ZEXT A,Q
+    ST Q,T_GOTQ
+    LD A,#2
+    JSR T_ARGS
+    LD A,0,Y                        ; want = low + high << 8, for the log
+    LD B,1,Y
+    EXG A,B
+    ZEXT D,Q
+    ST Q,T_WANTQ
+    LD A,#1
+    ST A,T_WIDTH
+    LD A,#3
+    ST A,T_KIND
+    JSR T_COUNT
+    LD A,T_GOTQ
+    CMP A,0,Y
+    BLO T_RECORD
+    CMP A,1,Y
+    BHI T_RECORD
+    RTS
+
+; Finds the inline arguments of the check that called us and steps its return
+; address past them. A = how many bytes. Returns Y = the arguments, also in T_ARGP.
+; T_ARGS_CC also takes the caught CC off the stack into T_CC.
+T_ARGS:
+    ST A,T_WIDTH
+    MOV X,SP
+    LEA X,3,X                       ; the check's return address
+    LD Q,0,X
+    MOV Y,Q
+    MOV Q,Y
+    ST Q,T_ARGP
+    LD A,T_WIDTH
+    ZEXT A,D
+    MOV W,D
+    LD D,#0
+    ADD Q,T_ARGP                    ; past the arguments
+    ST W,0,X
+    ST B,2,X
+    RTS
+
+T_ARGS_CC:
+    ST A,T_NARG
+    MOV X,SP
+    LEA X,3,X                       ; the check's return address, the caught CC above it
+    LD A,3,X
+    ST A,T_CC
+    LD Q,0,X
+    MOV Y,Q
+    MOV Q,Y
+    ST Q,T_ARGP
+    LD A,T_NARG
+    ZEXT A,D
+    MOV W,D
+    LD D,#0
+    ADD Q,T_ARGP
+    ST W,1,X                        ; the new return address goes one byte up, over the CC
+    ST B,3,X
+    LD Q,-3,X                       ; our own return address moves up one byte too
+    ST W,-2,X
+    ST B,0,X
+    POP A                           ; and the stack drops the byte
+    RTS
+
+; Counts a check and logs it if got and want differ
+T_CHECK:
+    JSR T_COUNT
+    LD Q,T_GOTQ
+    CMP Q,T_WANTQ
+    BNE T_RECORD
+    RTS
+
+T_COUNT:
     LD D,T_NUM
     ADD D,#1
     ST D,T_NUM
     RTS
 
-; Value check: A = got, B = want
-T_CHECK8:
-    CMP A,B
-    BNE .FAIL
-    RTS
-.FAIL:
-    ST A,T_GOT
-    ST B,T_WANT
-    CLR A
-    ST A,T_GOT+1
-    ST A,T_WANT+1
-    LD A,#1
-    ST A,T_KIND
-    JMP T_FAIL
-
-; Value check: D = got, W = want
-T_CHECK16:
-    CMP D,W
-    BNE .FAIL
-    RTS
-.FAIL:
-    ST D,T_GOT
-    ST W,T_WANT
-    LD A,#1
-    ST A,T_KIND
-    JMP T_FAIL
-
-; Flag check: A = caught CC, B = want, E = mask of the flags to compare
-T_FLAGS:
-    AND A,E
-    CMP A,B
-    BNE .FAIL
-    RTS
-.FAIL:
-    ST A,T_GOT
-    ST B,T_WANT
-    CLR A
-    ST A,T_GOT+1
-    ST A,T_WANT+1
-    LD A,#2
-    ST A,T_KIND
-    JMP T_FAIL
-
-; All cases passed: green screen, PASS and the count
-T_PASS:
-    LD A,#T_PASSED
-    ST A,T_STATUS
-    LD A,#$14                       ; backdrop: green
-    ST A,VRAM_PALETTE
-    LD X,#T_S_PASS
-    LD Y,#VRAM_BG0+(T_ROW_STATE*40+T_COL)*2
-    JSR T_PUTS
+; Logs the failing check: T_KIND, T_WIDTH, T_GOTQ, T_WANTQ, T_SECTP
+T_RECORD:
+    LD D,T_FAILS
+    ADD D,#1
+    ST D,T_FAILS
+    LD A,T_LOGN
+    CMP A,#T_LOG_MAX
+    BHS .FULL
+    MOV B,A
+    INC A
+    ST A,T_LOGN
+    CLR A                           ; X = T_LOG + entry * 16
+    ASL D,#4
+    LD X,#T_LOG
+    SMODX X,D
     LD D,T_NUM
-    JSR T_HEX16
-    LD X,#T_S_CASES
-    JSR T_PUTS
-    BRA T_HALT
-
-; A case failed: red screen, which case, got and want
-T_FAIL:
-    LD A,#T_FAILED
-    ST A,T_STATUS
-    LD A,#$A0                       ; backdrop: dark red
-    ST A,VRAM_PALETTE
-    LD X,#T_S_FAIL
+    ST D,0,X
     LD A,T_KIND
-    CMP A,#2
-    BNE .KIND
-    LD X,#T_S_FAIL_FLAGS
-.KIND:
-    LD Y,#VRAM_BG0+(T_ROW_STATE*40+T_COL)*2
-    JSR T_PUTS
-    LD X,#T_S_CASE
-    LD Y,#VRAM_BG0+(T_ROW_CASE*40+T_COL)*2
-    JSR T_PUTS
-    LD D,T_NUM
-    JSR T_HEX16
-    LD X,#T_S_GOT
-    LD Y,#VRAM_BG0+(T_ROW_GOT*40+T_COL)*2
-    JSR T_PUTS
-    LD D,T_GOT
-    JSR T_HEX16
-    LD X,#T_S_WANT
-    LD Y,#VRAM_BG0+(T_ROW_WANT*40+T_COL)*2
-    JSR T_PUTS
-    LD D,T_WANT
-    JSR T_HEX16
-T_HALT:
-    WAITV
-    BRA T_HALT
+    ST A,2,X
+    LD A,T_WIDTH
+    ST A,3,X
+    LD Q,T_GOTQ
+    ST Q,4,X
+    LD Q,T_WANTQ
+    ST Q,8,X
+    LD Q,T_SECTP
+    ST Q,12,X
+.FULL:
+    RTS
 
 ; Print the zero-terminated string at X to the BG0 cell at Y; Y ends just after it
 T_PUTS:
@@ -189,14 +321,12 @@ T_PUTS:
 .DONE:
     RTS
 
-; Print D as 4 hex digits at Y
+; Print D as 4 hex digits at Y (attribute byte in T_PATTR)
 T_HEX16:
     ST D,T_HEXTMP
     LD A,T_HEXTMP+1                 ; high byte first
     JSR T_HEX8
     LD A,T_HEXTMP
-    BRA T_HEX8
-
 ; Print A as 2 hex digits at Y
 T_HEX8:
     ST A,T_HEXTMP+2
@@ -213,17 +343,35 @@ T_DIGIT:
     ADD A,#$30                      ; 0-9 to '0'-'9'
 .PUT:
     ST A,0,Y
-    LD A,#T_ATTR
+    LD A,T_PATTR
     ST A,1,Y
     LEA Y,2,Y
     RTS
 
+; Sets T_STATUS from the fail count; the ROM shows its own final screen
+T_FINISH:
+    LD D,T_FAILS
+    TST D
+    BNE .FAIL
+    LD A,#1
+    BRA .SET
+.FAIL:
+    LD A,#2
+.SET:
+    ST A,T_STATUS
+    RTS
+
+T_QUIET:        .BYTE 0             ; 1 = don't print section names (the PPU page is up)
+T_PATTR:        .BYTE T_ATTR
+T_KIND:         .BYTE 0
+T_WIDTH:        .BYTE 0
+T_NARG:         .BYTE 0
+T_CC:           .BYTE 0
 T_HEXTMP:       .BYTE 0, 0, 0
+T_GOTQ:         .LONG 0
+T_WANTQ:        .LONG 0
+T_SECTP:        .LONG 0
+T_ARGP:         .LONG 0
+T_FRAME:        .LONG 0
+T_TMPQ:         .LONG 0
 T_S_RUNNING:    .BYTE "RUNNING", 0
-T_S_PASS:       .BYTE "PASS  $", 0
-T_S_CASES:      .BYTE " CASES", 0
-T_S_FAIL:       .BYTE "FAIL: VALUE", 0
-T_S_FAIL_FLAGS: .BYTE "FAIL: FLAGS (HNZVC)", 0
-T_S_CASE:       .BYTE "CASE $", 0
-T_S_GOT:        .BYTE "GOT  $", 0
-T_S_WANT:       .BYTE "WANT $", 0
