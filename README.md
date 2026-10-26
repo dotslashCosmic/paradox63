@@ -19,3 +19,7 @@ The Paradox63 aims to define, explore and tool an 8-bit architecture from the gr
 - direct machine control
 
 - expressive instruction sets
+
+## Includes
+
+An official Paradox63 BIOS ROM, a full CPU test suite, a song test, and a basic Pong game.
