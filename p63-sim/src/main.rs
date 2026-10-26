@@ -18,6 +18,9 @@ use p63_core::{Ram, ReferenceInterpreter};
 #[derive(Parser)]
 #[command(name = "p63-sim", about = "Paradox63 assembler and emulator tools")]
 struct Cli {
+    /// The signed BIOS image (default: bios.bin next to p63-sim, or in this folder)
+    #[arg(long, global = true)]
+    bios: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -37,15 +40,15 @@ enum Command {
         #[arg(short, long)]
         cart: Option<PathBuf>,
     },
-    /// Play a program (assembly source or .p63 cartridge) in a window.
-    /// Arrows = D-pad, Enter = Start, Backspace = Select, Z/X = A/B, Esc = quit
+    /// Play a cartridge in a window, booted through the BIOS.
+    /// Arrows = D-pad, Enter = Start, Backspace/C = Select, Z/X = A/B, Esc = quit
     Play {
         file: PathBuf,
         /// Print a line a second: fps and where each frame's time went
         #[arg(long)]
         stats: bool,
     },
-    /// Boot a program (assembly source or .p63 cartridge) and run it
+    /// Boot a cartridge through the BIOS and run it headless (fresh settings: Home comes up)
     Run {
         file: PathBuf,
         /// Frames to run (60 per second)
@@ -76,7 +79,7 @@ enum Command {
         #[arg(long, default_value_t = 10_000_000)]
         max_steps: u64,
     },
-    /// Run test ROMs and report pass or fail; exits with failure if any fail
+    /// Run test ROM cartridges through the BIOS (Boot to Cartridge on) and report pass or fail
     Test {
         files: Vec<PathBuf>,
         /// Give each ROM this many frames to finish
@@ -86,14 +89,16 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    let bios = cli.bios.as_deref();
+    let result = match cli.command {
         Command::Asm { file, output, symbols, cart } => asm(&file, output.as_deref(), symbols, cart.as_deref()),
-        Command::Play { file, stats } => play(&file, stats),
+        Command::Play { file, stats } => play(&file, bios, stats),
         Command::Run { file, frames, peek, hold, screenshot, wav } => {
-            run(&file, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
+            run(&file, bios, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
         }
         Command::Call { file, routine, regs, max_steps } => call(&file, &routine, &regs, max_steps),
-        Command::Test { files, frames } => test(&files, frames),
+        Command::Test { files, frames } => test(&files, bios, frames),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -103,6 +108,9 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// The BIOS's settings with Boot to Cartridge on: its marker, then the switch.
+const BOOT_TO_CART: [u8; 2] = [0x63, 1];
 
 /// Where test ROMs leave their results (see games/tests/testlib.p63).
 const TEST_RESULT: u32 = 0x00F000;
@@ -143,16 +151,18 @@ fn describe_failure(machine: &mut p63_bus::Machine, entry: u32) -> String {
     format!("#{num} {section}: {what}")
 }
 
-fn test(files: &[PathBuf], frames: u64) -> Result<(), String> {
+fn test(files: &[PathBuf], bios: Option<&Path>, frames: u64) -> Result<(), String> {
     let mut failed = 0;
     for file in files {
         let name = file.display();
-        let (mut machine, _) = boot(file)?;
+        let (mut machine, _) = boot(file, bios)?;
+        machine.cpu.bus.nvram[..2].copy_from_slice(&BOOT_TO_CART);
         let mut status = 0;
         for _ in 0..frames {
             machine.run_frame().map_err(|e| format!("{name}: at ${:06X}: {e}", machine.cpu.registers.pc()))?;
+            // 1 passed, 2 failed; anything else is still running (or a boot ROM's RAM test)
             status = peek(&mut machine, TEST_RESULT, 1);
-            if status != 0 {
+            if status == 1 || status == 2 {
                 break;
             }
         }
@@ -286,18 +296,57 @@ fn save_bmp(path: &Path, pixels: &[u32], width: usize, height: usize) -> Result<
     std::fs::write(path, out).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Reads a cartridge, or assembles and packs a source file, and boots it.
-fn boot(file: &Path) -> Result<(p63_bus::Machine, p63_cart::Cart), String> {
-    let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let cart = if bytes.starts_with(p63_cart::MAGIC) {
-        bytes
-    } else {
-        let program = p63_asm::assemble_file(file).map_err(|e| errors_to_string(&e))?;
-        make_cart(&program, file)?
+/// What `run` and `play` show about the cartridge they booted, and the BIOS that booted it.
+struct BootInfo {
+    title: String,
+    image_len: usize,
+    bios: PathBuf,
+}
+
+/// Boots a cartridge the way the console does: through the BIOS, which checks it and
+/// shows any error itself. Assembly source isn't a cartridge; `asm -c` builds one.
+fn boot(file: &Path, bios: Option<&Path>) -> Result<(p63_bus::Machine, BootInfo), String> {
+    if is_source(file) {
+        let cart = file.with_extension("p63c");
+        return Err(format!(
+            "{} is assembly source, not a cartridge. Build one first:\n  p63-sim asm {} -c {}",
+            file.display(),
+            file.display(),
+            cart.display()
+        ));
+    }
+    let cart = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let bios = find_bios(bios)?;
+    let info = match p63_cart::Cart::parse(cart.clone()) {
+        Ok(c) => BootInfo { title: c.title.clone(), image_len: c.image().len(), bios: bios.clone() },
+        Err(e) => BootInfo { title: format!("bad cartridge, {e}"), image_len: 0, bios: bios.clone() },
     };
     let mut machine = p63_bus::Machine::new();
-    let info = machine.boot(cart).map_err(|e| e.to_string())?;
+    machine.boot_with_rom(load_bios(&bios)?, cart)?;
     Ok((machine, info))
+}
+
+fn is_source(file: &Path) -> bool {
+    file.extension().is_some_and(|e| e.eq_ignore_ascii_case("p63") || e.eq_ignore_ascii_case("asm"))
+}
+
+/// The BIOS: the one given, else bios.bin next to p63-sim, else bios.bin here.
+fn find_bios(given: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(path) = given {
+        return Ok(path.to_path_buf());
+    }
+    let beside_exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("bios.bin")));
+    beside_exe
+        .into_iter()
+        .chain([PathBuf::from("bios.bin")])
+        .find(|p| p.is_file())
+        .ok_or_else(|| "no BIOS: put bios.bin next to p63-sim or in this folder, or pass --bios FILE".to_string())
+}
+
+/// A signed boot ROM file: refused unless its signature verifies.
+fn load_bios(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    p63_bus::bios::verify(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Per-second timing for `play --stats`: how evenly frames reach the window, and where the time goes.
@@ -409,7 +458,12 @@ impl Drop for FineTimer {
     }
 }
 
-fn play(file: &Path, stats: bool) -> Result<(), String> {
+/// Where a boot ROM's settings RAM is kept between runs: next to it, as .nvram.
+fn nvram_path(bios: &Path) -> PathBuf {
+    bios.with_extension("nvram")
+}
+
+fn play(file: &Path, bios: Option<&Path>, stats: bool) -> Result<(), String> {
     use minifb::{Key, Scale, Window, WindowOptions};
     use std::time::Instant;
     let keys = [
@@ -423,7 +477,12 @@ fn play(file: &Path, stats: bool) -> Result<(), String> {
         (Key::Z, 0x80),
         (Key::X, 0x40),
     ];
-    let (mut machine, info) = boot(file)?;
+    let (mut machine, info) = boot(file, bios)?;
+    let nvram = Some(nvram_path(&info.bios));
+    if let Some(saved) = nvram.as_ref().and_then(|p| std::fs::read(p).ok()) {
+        let n = saved.len().min(p63_bus::NVRAM_LEN);
+        machine.cpu.bus.nvram[..n].copy_from_slice(&saved[..n]);
+    }
     let (w, h) = (p63_ppu::WIDTH, p63_ppu::HEIGHT);
     let options = WindowOptions { scale: Scale::X2, resize: true, ..WindowOptions::default() };
     let mut window = Window::new(&format!("Paradox63 - {}", info.title), w, h, options).map_err(|e| e.to_string())?;
@@ -439,6 +498,10 @@ fn play(file: &Path, stats: bool) -> Result<(), String> {
         let t1 = Instant::now();
         machine.cpu.bus.keyboard.pad[0] = keys.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
         machine.run_frame().map_err(|e| format!("frame {}, at ${:06X}: {e}", machine.frames, machine.cpu.registers.pc()))?;
+        if let Some(path) = nvram.as_ref().filter(|_| machine.cpu.bus.nvram_dirty) {
+            machine.cpu.bus.nvram_dirty = false;
+            std::fs::write(path, machine.cpu.bus.nvram).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
         if let Some(speaker) = &speaker {
             speaker.push(&machine.audio);
         }
@@ -454,14 +517,15 @@ fn play(file: &Path, stats: bool) -> Result<(), String> {
 
 fn run(
     file: &Path,
+    bios: Option<&Path>,
     frames: u64,
     peek: &[String],
     hold: &[String],
     screenshot: Option<&Path>,
     wav: Option<&Path>,
 ) -> Result<(), String> {
-    let (mut machine, info) = boot(file)?;
-    println!("booted {:?} ({} byte image)", info.title, info.image().len());
+    let (mut machine, info) = boot(file, bios)?;
+    println!("booted {:?} ({} byte image)", info.title, info.image_len);
     for name in hold {
         machine.cpu.bus.keyboard.pad[0] |= button(name)?;
     }
