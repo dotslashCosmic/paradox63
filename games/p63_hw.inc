@@ -243,3 +243,21 @@ ERR_RETURNED    EQU 10     ; Cartridge entry returned
 ERR_INTERRUPT   EQU 11     ; Unexpected interrupt or SWI
 ERR_LENGTH      EQU 12     ; Image length out of range
 ERR_NOCART      EQU 13     ; No cartridge inserted
+ERR_SYSTEM      EQU 14     ; The console can't hide the boot ROM (SYS_LOCK missing)
+ERR_SEAL        EQU 15     ; Sealed cartridge whose seal doesn't check out
+
+; --- System latches and the cartridge engine
+ENGINE_KEY      EQU $FFFE00     ; 32 bytes
+ENGINE_SEAL     EQU $FFFE20     ; 32 bytes
+ENGINE_DST      EQU $FFFE40     ; 3 bytes
+ENGINE_CTRL     EQU $FFFE43
+NVRAM_BASE      EQU $FFFE80     ; 64 bytes
+SYS_LOCK        EQU $FFFED0
+SYS_RESET       EQU $FFFED1
+ENGINE_CHECK    EQU $01
+ENGINE_LOAD     EQU $02
+ENGINE_OK       EQU $01     ; status: done
+ENGINE_SEALED   EQU $02     ; status: the seal checks out
+ENGINE_FAIL     EQU $80     ; status: a part is missing, the seal is wrong, or the engine is locked
+CF_ENCRYPTED    EQU $01     ; header FLAGS (v1.1)
+CF_SEALED       EQU $02     ; header FLAGS (v1.1)

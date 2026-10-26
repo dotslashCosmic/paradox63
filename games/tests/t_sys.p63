@@ -67,15 +67,39 @@ SYS_MEMMAP:
     PUSH CC
     JSR T_FL
     .BYTE FL_Z, FL_Z
+    LD A,SYS_LOCK                   ; the BIOS locked before starting us
+    JSR T_V8
+    .BYTE 1
+    LD A,BOOT_ROM                   ; so the boot ROM is hidden
+    JSR T_V8
+    .BYTE $FF
+    LD A,#ENGINE_CHECK              ; and the cartridge engine does nothing
+    ST A,ENGINE_CTRL
+    LD A,ENGINE_CTRL
+    JSR T_V8
+    .BYTE ENGINE_FAIL
     LD Q,CART_WIN                   ; the cart window starts with the header magic
     JSR T_V32
     .LONG 'P'|'6'<<8|'3'<<16|'C'<<24
-    LD A,CART_WIN+64                ; and the image follows the 64-byte header: our first byte
+    LD A,CART_WIN+CH_VER_MINOR      ; header 1.1 may say the image is encrypted
+    BEQ .PLAIN
+    LD A,CART_WIN+CH_FLAGS
+    AND A,#CF_ENCRYPTED
+    BEQ .PLAIN
+    LD Q,CART_WIN+64                ; encrypted: the window shows it scrambled, not our code
+    CMP Q,FIXED_ENTRY
+    PUSH CC
+    JSR T_FL
+    .BYTE 0, FL_Z
+    BRA .WINDOW
+.PLAIN:
+    LD A,CART_WIN+64                ; plain: the image follows the 64-byte header: our first byte
     LD B,FIXED_ENTRY
     CMP A,B
     PUSH CC
     JSR T_FL
     .BYTE FL_Z, FL_Z
+.WINDOW:
     LD A,#'X'                       ; the cart window ignores writes
     ST A,CART_WIN
     LD A,CART_WIN

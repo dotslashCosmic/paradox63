@@ -39,6 +39,9 @@ enum Command {
         /// Write a .p63 cartridge (image loaded at $000100) to this file
         #[arg(short, long)]
         cart: Option<PathBuf>,
+        /// Encrypt the cartridge so only a P63 console can read it
+        #[arg(long, requires = "cart")]
+        encrypt: bool,
     },
     /// Play a cartridge in a window, booted through the BIOS.
     /// Arrows = D-pad, Enter = Start, Backspace/C = Select, Z/X = A/B, Esc = quit
@@ -92,7 +95,9 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let bios = cli.bios.as_deref();
     let result = match cli.command {
-        Command::Asm { file, output, symbols, cart } => asm(&file, output.as_deref(), symbols, cart.as_deref()),
+        Command::Asm { file, output, symbols, cart, encrypt } => {
+            asm(&file, output.as_deref(), symbols, cart.as_deref(), encrypt)
+        }
         Command::Play { file, stats } => play(&file, bios, stats),
         Command::Run { file, frames, peek, hold, screenshot, wav } => {
             run(&file, bios, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
@@ -121,8 +126,8 @@ const ACID_RED: u32 = 0x00FF_0000;
 
 /// Little-endian value of `bytes` bytes at `addr`.
 fn peek(machine: &mut p63_bus::Machine, addr: u32, bytes: u32) -> u32 {
-    use p63_core::{Addr, Bus};
-    (0..bytes).fold(0, |v, i| v | u32::from(machine.cpu.bus.read(Addr::new(addr + i))) << (8 * i))
+    use p63_core::Addr;
+    (0..bytes).fold(0, |v, i| v | u32::from(machine.cpu.bus.peek(Addr::new(addr + i))) << (8 * i))
 }
 
 /// Zero-terminated text at `addr`, up to 40 characters.
@@ -222,7 +227,7 @@ fn errors_to_string(errors: &[p63_asm::AsmError]) -> String {
     errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
 }
 
-fn asm(file: &Path, output: Option<&Path>, symbols: bool, cart: Option<&Path>) -> Result<(), String> {
+fn asm(file: &Path, output: Option<&Path>, symbols: bool, cart: Option<&Path>, encrypt: bool) -> Result<(), String> {
     let program = p63_asm::assemble_file(file).map_err(|e| errors_to_string(&e))?;
     for (addr, bytes) in &program.segments {
         println!("${addr:06X}: {} bytes", bytes.len());
@@ -244,9 +249,15 @@ fn asm(file: &Path, output: Option<&Path>, symbols: bool, cart: Option<&Path>) -
         println!("wrote {} bytes from ${start:06X} to {}", image.len(), out.display());
     }
     if let Some(out) = cart {
-        let data = make_cart(&program, file)?;
+        let mut data = make_cart(&program, file)?;
+        if encrypt {
+            let mut secret = [0u8; 32];
+            getrandom::getrandom(&mut secret).map_err(|e| format!("no random numbers for the key: {e}"))?;
+            data = p63_cart::crypt::encrypt(&data, &p63_cart::crypt::CONSOLE_KEY, secret);
+        }
         std::fs::write(out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
-        println!("wrote cartridge {} ({} bytes)", out.display(), data.len());
+        let how = if encrypt { "encrypted cartridge" } else { "cartridge" };
+        println!("wrote {how} {} ({} bytes)", out.display(), data.len());
     }
     Ok(())
 }
@@ -554,7 +565,7 @@ fn run(
         let (addr, len) = spec.split_once(':').ok_or(format!("--peek wants ADDR:LEN, got `{spec}`"))?;
         let (addr, len) = (parse_value(addr)?, parse_value(len)?);
         let bytes: Vec<String> =
-            (0..len).map(|i| format!("{:02X}", p63_core::Bus::read(&mut machine.cpu.bus, p63_core::Addr::new(addr + i)))).collect();
+            (0..len).map(|i| format!("{:02X}", machine.cpu.bus.peek(p63_core::Addr::new(addr + i)))).collect();
         println!("${addr:06X}: {}", bytes.join(" "));
     }
     Ok(())

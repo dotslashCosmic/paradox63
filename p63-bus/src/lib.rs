@@ -5,7 +5,7 @@ pub mod devices;
 
 use devices::{CartPort, Device, Keyboard, Video};
 use p63_apu::Apu;
-use p63_cart::{BootError, Cart};
+use p63_cart::{crypt, BootError, Cart};
 use p63_core::{Addr, Bus, CpuError, Flags, ReferenceInterpreter};
 use p63_spec as spec;
 
@@ -24,6 +24,9 @@ pub struct SystemBus {
     pub reset_reason: u8,
     /// A write to `SYS_RESET` waiting for the machine to act on it.
     pub reset_requested: bool,
+    pub engine: Engine,
+    /// Cycles the engine took from the CPU, still to be counted.
+    pub stall: u32,
     pub video: Video,
     pub keyboard: Keyboard,
     pub cart: CartPort,
@@ -40,6 +43,8 @@ impl Default for SystemBus {
             boot_locked: false,
             reset_reason: 0,
             reset_requested: false,
+            engine: Engine::default(),
+            stall: 0,
             video: Video::default(),
             keyboard: Keyboard::default(),
             cart: CartPort::default(),
@@ -55,6 +60,48 @@ impl SystemBus {
         &self.ram
     }
 
+    /// A read for tools (peeks, debuggers): as the CPU would see it, except that the
+    /// boot ROM always reads $FF, locked or not.
+    pub fn peek(&mut self, addr: Addr) -> u8 {
+        if within(addr.0, spec::BOOT_ROM, spec::CART_WIN - 1) {
+            0xFF
+        } else {
+            self.read(addr)
+        }
+    }
+
+    /// The engine's job: 1 checks the cart, 2 also loads its image at `ENGINE_DST`.
+    fn run_engine(&mut self, op: u8) {
+        let status = self.engine_status(op).unwrap_or(ENGINE_FAIL);
+        self.engine.status = status;
+    }
+
+    fn engine_status(&mut self, op: u8) -> Option<u8> {
+        let e = &self.engine;
+        let (check, load) = (spec::ENGINE_CHECK as u8, spec::ENGINE_LOAD as u8);
+        if e.locked || (op != check && op != load) {
+            return None;
+        }
+        let data = &self.cart.data;
+        let layout = crypt::Layout::of(data).ok()?;
+        if layout.sealed {
+            self.stall += ENGINE_SEAL_CYCLES + layout.signed_len() as u32;
+            if !crypt::seal_ok(data, layout, &e.seal) {
+                return None;
+            }
+        }
+        if op == load {
+            let end = e.dst as usize + layout.image_len;
+            if end > spec::MAIN_TOP as usize + 1 {
+                return None;
+            }
+            let image = crypt::image(data, layout, &e.key);
+            self.ram[e.dst as usize..end].copy_from_slice(&image);
+            self.stall += layout.image_len as u32 * ENGINE_CYCLES_PER_BYTE;
+        }
+        Some(ENGINE_OK | if layout.sealed { ENGINE_SEALED } else { 0 })
+    }
+
     /// Runs the audio engine for one output tick over Audio RAM.
     pub fn audio_tick(&mut self) -> (i16, i16) {
         self.audio.tick(&self.ram[spec::ARAM_BASE as usize..=spec::ARAM_END as usize])
@@ -62,14 +109,35 @@ impl SystemBus {
 }
 
 /// The settings RAM: 64 bytes inside the reserved I/O block.
-pub const NVRAM_BASE: u32 = 0xFF_FE80;
+pub use spec::NVRAM_BASE;
 pub const NVRAM_LEN: usize = 64;
 const NVRAM_END: u32 = NVRAM_BASE + NVRAM_LEN as u32 - 1;
 
+/// The cartridge engine: copies the cart's image into RAM, decrypting it and
+/// checking its seal on the way, with keys the BIOS gives it.
+pub use spec::{ENGINE_CTRL, ENGINE_DST, ENGINE_KEY, ENGINE_SEAL};
+const ENGINE_END: u32 = ENGINE_CTRL;
+pub const ENGINE_OK: u8 = spec::ENGINE_OK as u8;
+pub const ENGINE_SEALED: u8 = spec::ENGINE_SEALED as u8;
+pub const ENGINE_FAIL: u8 = spec::ENGINE_FAIL as u8;
+/// CPU cycles the engine holds the bus for: per byte loaded, and per seal check.
+const ENGINE_CYCLES_PER_BYTE: u32 = 2;
+const ENGINE_SEAL_CYCLES: u32 = 20_000;
+
 /// Any write hides the boot ROM until the next reset; reads 1 while hidden.
-pub const SYS_LOCK: u32 = 0xFF_FED0;
-/// Any write resets the console; reads the value last written (0 at power-on).
-pub const SYS_RESET: u32 = 0xFF_FED1;
+/// Any write to `SYS_RESET` resets the console; it reads the value last written.
+pub use spec::{SYS_LOCK, SYS_RESET};
+
+/// The cartridge engine's state. Its keys can be written, never read, and are wiped
+/// when the boot ROM locks.
+#[derive(Default)]
+pub struct Engine {
+    key: [u8; 32],
+    seal: [u8; 32],
+    dst: u32,
+    status: u8,
+    locked: bool,
+}
 
 fn within(a: u32, base: u32, end: u32) -> bool {
     (base..=end).contains(&a)
@@ -101,6 +169,10 @@ impl Bus for SystemBus {
             self.cart.read(a - spec::CART_STAT)
         } else if within(a, NVRAM_BASE, NVRAM_END) {
             self.nvram[(a - NVRAM_BASE) as usize]
+        } else if within(a, ENGINE_DST, ENGINE_DST + 2) {
+            (self.engine.dst >> (8 * (a - ENGINE_DST))) as u8
+        } else if a == ENGINE_CTRL {
+            self.engine.status
         } else if a == SYS_LOCK {
             u8::from(self.boot_locked)
         } else if a == SYS_RESET {
@@ -119,8 +191,22 @@ impl Bus for SystemBus {
         if within(a, NVRAM_BASE, NVRAM_END) {
             self.nvram[(a - NVRAM_BASE) as usize] = value;
             self.nvram_dirty = true;
+        } else if within(a, ENGINE_KEY, ENGINE_END) {
+            let e = &mut self.engine;
+            match a - ENGINE_KEY {
+                off @ 0x00..=0x1F if !e.locked => e.key[off as usize] = value,
+                off @ 0x20..=0x3F if !e.locked => e.seal[off as usize - 0x20] = value,
+                off @ 0x40..=0x42 => {
+                    let shift = 8 * (off - 0x40);
+                    e.dst = (e.dst & !(0xFF << shift)) | u32::from(value) << shift;
+                }
+                0x43 => self.run_engine(value),
+                _ => {}
+            }
         } else if a == SYS_LOCK {
+            // the engine's keys go with the boot ROM
             self.boot_locked = true;
+            self.engine = Engine { locked: true, ..Engine::default() };
         } else if a == SYS_RESET {
             self.reset_reason = value;
             self.reset_requested = true;
@@ -209,6 +295,7 @@ impl Machine {
         let bus = &mut self.cpu.bus;
         bus.boot_locked = false;
         bus.reset_requested = false;
+        bus.engine = Engine::default();
         bus.video = Video::default();
         bus.audio = Apu::default();
         bus.cart.reset();
@@ -232,7 +319,7 @@ impl Machine {
                 self.cpu.bus.video.dot = spent;
                 self.cpu.set_irq_pending(self.cpu.bus.video.irq());
                 self.cpu.set_firq_pending(self.cpu.bus.audio.firq());
-                let cycles = self.cpu.step()?.0;
+                let cycles = self.cpu.step()?.0 + std::mem::take(&mut self.cpu.bus.stall);
                 if self.cpu.bus.reset_requested {
                     self.reset();
                 }
@@ -311,6 +398,7 @@ mod tests {
         let mut m = Machine::new();
         m.cpu.bus.boot_rom = vec![0x12, 0x34];
         assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0x12);
+        assert_eq!(m.cpu.bus.peek(Addr::new(spec::BOOT_ROM)), 0xFF, "tools never see it");
         m.cpu.bus.write(Addr::new(SYS_LOCK), 0);
         assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0xFF, "hidden once locked");
         assert_eq!(read(&mut m.cpu.bus, SYS_LOCK), 1);
@@ -319,6 +407,28 @@ mod tests {
         m.reset();
         assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0x12, "back after a reset");
         assert_eq!(read(&mut m.cpu.bus, SYS_RESET), 0x0B, "the reason stays");
+    }
+
+    #[test]
+    fn engine_loads_an_encrypted_cart_until_locked() {
+        let secret = [7u8; 32];
+        let plain = p63_cart::pack(&[1, 2, 3, 4], &p63_cart::PackOptions::default()).unwrap();
+        let mut bus = SystemBus::default();
+        bus.cart.data = crypt::encrypt(&plain, &crypt::public_key(secret), [9u8; 32]);
+        for (i, b) in secret.into_iter().enumerate() {
+            bus.write(Addr::new(ENGINE_KEY + i as u32), b);
+        }
+        assert_eq!(read(&mut bus, ENGINE_KEY), 0xFF, "the key can't be read back");
+        bus.write_u24_le(Addr::new(ENGINE_DST), 0x2000);
+        bus.write(Addr::new(ENGINE_CTRL), 2);
+        assert_eq!(read(&mut bus, ENGINE_CTRL), ENGINE_OK);
+        assert_eq!(&bus.memory()[0x2000..0x2004], &[1, 2, 3, 4]);
+        assert!(bus.stall > 0, "the copy takes bus time");
+        bus.write(Addr::new(SYS_LOCK), 0);
+        bus.write(Addr::new(ENGINE_CTRL), 2);
+        assert_eq!(read(&mut bus, ENGINE_CTRL), ENGINE_FAIL, "nothing once locked");
+        bus.write(Addr::new(ENGINE_KEY), 1);
+        assert_eq!(bus.engine.key, [0; 32], "and no new keys");
     }
 
     #[test]

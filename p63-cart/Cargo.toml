@@ -7,3 +7,7 @@ edition.workspace = true
 [dependencies]
 p63-core = { path = "../p63-core" }
 p63-spec = { path = "../p63-spec" }
+chacha20 = "0.9"
+ed25519-dalek = "2.1"
+sha2 = "0.10"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }

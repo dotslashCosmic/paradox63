@@ -248,6 +248,22 @@ pub const ERR_RETURNED: u32 = 10;
 pub const ERR_INTERRUPT: u32 = 11;
 pub const ERR_LENGTH: u32 = 12;
 pub const ERR_NOCART: u32 = 13;
+pub const ERR_SYSTEM: u32 = 14;
+pub const ERR_SEAL: u32 = 15;
+pub const ENGINE_KEY: u32 = 0xFFFE00;
+pub const ENGINE_SEAL: u32 = 0xFFFE20;
+pub const ENGINE_DST: u32 = 0xFFFE40;
+pub const ENGINE_CTRL: u32 = 0xFFFE43;
+pub const NVRAM_BASE: u32 = 0xFFFE80;
+pub const SYS_LOCK: u32 = 0xFFFED0;
+pub const SYS_RESET: u32 = 0xFFFED1;
+pub const ENGINE_CHECK: u32 = 0x01;
+pub const ENGINE_LOAD: u32 = 0x02;
+pub const ENGINE_OK: u32 = 0x01;
+pub const ENGINE_SEALED: u32 = 0x02;
+pub const ENGINE_FAIL: u32 = 0x80;
+pub const CF_ENCRYPTED: u32 = 0x01;
+pub const CF_SEALED: u32 = 0x02;
 
 pub struct OpInfo { pub opcode: u8, pub group: &'static str, pub mnemonic: &'static str, pub operands: &'static str, pub cycles: &'static str, pub legal: bool }
 

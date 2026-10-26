@@ -1,5 +1,7 @@
 //! p63-cart: `.p63` cartridge images: pack, verify, and load.
 
+pub mod crypt;
+
 use std::fmt;
 
 use p63_core::{Addr, Bus};
@@ -102,11 +104,11 @@ pub fn checksum(image: &[u8]) -> u32 {
         .fold(0u32, u32::wrapping_add)
 }
 
-fn le(data: &[u8], at: u32, len: usize) -> u32 {
+pub(crate) fn le(data: &[u8], at: u32, len: usize) -> u32 {
     data[at as usize..at as usize + len].iter().rev().fold(0, |acc, &b| (acc << 8) | u32::from(b))
 }
 
-fn put(out: &mut [u8], at: u32, len: usize, value: u32) {
+pub(crate) fn put(out: &mut [u8], at: u32, len: usize, value: u32) {
     for i in 0..len {
         out[at as usize + i] = (value >> (8 * i)) as u8;
     }
@@ -158,11 +160,14 @@ impl Cart {
         if le(&data, spec::CH_VER_MAJOR, 1) != u32::from(VERSION.0) {
             return Err(BootError::Major);
         }
-        if le(&data, spec::CH_VER_MINOR, 1) != u32::from(VERSION.1) {
-            return Err(BootError::Minor);
-        }
-        if le(&data, spec::CH_FLAGS, 2) != 0 {
-            return Err(BootError::Flags);
+        // 1.0 has no flags; 1.1 adds encrypted and sealed
+        let flags = le(&data, spec::CH_FLAGS, 2);
+        match le(&data, spec::CH_VER_MINOR, 1) {
+            0 if flags != 0 => return Err(BootError::Flags),
+            0 => {}
+            1 if flags & !(crypt::FLAG_ENCRYPTED | crypt::FLAG_SEALED) != 0 => return Err(BootError::Flags),
+            1 => {}
+            _ => return Err(BootError::Minor),
         }
         let mapper = le(&data, spec::CH_MAPPER, 1);
         let save = match mapper {
@@ -179,10 +184,12 @@ impl Cart {
             return Err(BootError::Entry);
         }
         let len = le(&data, spec::CH_IMAGE_LEN, 3) as usize;
-        if len % 2 == 1 || !(2..=MAX_IMAGE).contains(&len) || HEADER_LEN + len > data.len() {
+        if len % 2 == 1 || !(2..=MAX_IMAGE).contains(&len) {
             return Err(BootError::Length);
         }
-        if checksum(&data[HEADER_LEN..HEADER_LEN + len]) != le(&data, spec::CH_CHECKSUM, 4) {
+        let layout = crypt::Layout::of(&data)?;
+        // an encrypted image can only be summed once the console has opened it
+        if !layout.encrypted && checksum(&data[HEADER_LEN..HEADER_LEN + len]) != le(&data, spec::CH_CHECKSUM, 4) {
             return Err(BootError::Checksum);
         }
         let title_bytes = &data[spec::CH_TITLE as usize..spec::CH_TITLE as usize + 16];
