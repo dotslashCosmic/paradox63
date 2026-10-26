@@ -113,6 +113,11 @@ pub struct CartPort {
 }
 
 impl CartPort {
+    /// Back to bank 0, as at power-on.
+    pub fn reset(&mut self) {
+        self.bank = 0;
+    }
+
     pub fn window(&self, off: u32) -> u8 {
         let at = usize::from(self.bank) * spec::CART_BANK_SIZE as usize + off as usize;
         self.data.get(at).copied().unwrap_or(0xFF)
