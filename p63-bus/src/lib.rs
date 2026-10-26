@@ -1,5 +1,6 @@
 //! p63-bus: the Paradox63 memory map, its devices, and the frame loop.
 
+pub mod bios;
 pub mod devices;
 
 use devices::{CartPort, Device, Keyboard, Video};
@@ -11,6 +12,12 @@ use p63_spec as spec;
 /// Every address, routed to RAM, ROM or a device.
 pub struct SystemBus {
     ram: Vec<u8>,
+    /// Boot ROM image at `BOOT_ROM`; empty when the high-level boot is used.
+    pub boot_rom: Vec<u8>,
+    /// Battery-backed settings RAM at `NVRAM_BASE`, kept by the boot ROM.
+    pub nvram: [u8; NVRAM_LEN],
+    /// Set when the settings RAM was written, so the frontend can save it.
+    pub nvram_dirty: bool,
     pub video: Video,
     pub keyboard: Keyboard,
     pub cart: CartPort,
@@ -21,6 +28,9 @@ impl Default for SystemBus {
     fn default() -> Self {
         Self {
             ram: vec![0; 0x0100_0000],
+            boot_rom: Vec::new(),
+            nvram: [0; NVRAM_LEN],
+            nvram_dirty: false,
             video: Video::default(),
             keyboard: Keyboard::default(),
             cart: CartPort::default(),
@@ -42,6 +52,11 @@ impl SystemBus {
     }
 }
 
+/// The settings RAM: 64 bytes inside the reserved I/O block.
+pub const NVRAM_BASE: u32 = 0xFF_FE80;
+pub const NVRAM_LEN: usize = 64;
+const NVRAM_END: u32 = NVRAM_BASE + NVRAM_LEN as u32 - 1;
+
 fn within(a: u32, base: u32, end: u32) -> bool {
     (base..=end).contains(&a)
 }
@@ -54,8 +69,8 @@ impl Bus for SystemBus {
         } else if a <= spec::MAIN_TOP {
             self.ram[a as usize]
         } else if within(a, spec::BOOT_ROM, spec::CART_WIN - 1) {
-            // no boot ROM image; the high-level boot does its job
-            0xFF
+            // without a boot ROM image the high-level boot does its job
+            self.boot_rom.get((a - spec::BOOT_ROM) as usize).copied().unwrap_or(0xFF)
         } else if within(a, spec::CART_WIN, spec::CART_WIN_END) {
             self.cart.window(a - spec::CART_WIN)
         } else if within(a, spec::VIDEO_IO_BASE, spec::VIDEO_IO_END) {
@@ -66,6 +81,8 @@ impl Bus for SystemBus {
             self.audio.read(a - spec::AUDIO_IO_BASE)
         } else if within(a, spec::CART_STAT, spec::AUDIO_IO_BASE - 1) {
             self.cart.read(a - spec::CART_STAT)
+        } else if within(a, NVRAM_BASE, NVRAM_END) {
+            self.nvram[(a - NVRAM_BASE) as usize]
         } else if within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // reserved I/O
             0xFF
@@ -77,7 +94,10 @@ impl Bus for SystemBus {
 
     fn write(&mut self, addr: Addr, value: u8) {
         let a = addr.0;
-        if a < 4 || within(a, spec::BOOT_ROM, spec::CART_WIN_END) || within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
+        if within(a, NVRAM_BASE, NVRAM_END) {
+            self.nvram[(a - NVRAM_BASE) as usize] = value;
+            self.nvram_dirty = true;
+        } else if a < 4 || within(a, spec::BOOT_ROM, spec::CART_WIN_END) || within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // ROM, the cart window and reserved I/O ignore writes
         } else if a <= spec::MAIN_TOP {
             self.ram[a as usize] = value;
@@ -141,6 +161,19 @@ impl Machine {
         r.set_cc(Flags::F | Flags::I);
         r.set_pc(spec::FIXED_ENTRY);
         Ok(cart)
+    }
+
+    /// Boots through a boot ROM image: the cartridge goes in as it is and the CPU
+    /// starts from RESET, so the boot ROM does the checking and loading.
+    pub fn boot_with_rom(&mut self, boot_rom: Vec<u8>, cart_file: Vec<u8>) -> Result<(), String> {
+        let size = (spec::CART_WIN - spec::BOOT_ROM) as usize;
+        if boot_rom.len() > size {
+            return Err(format!("boot ROM is {} bytes; the slot holds {size}", boot_rom.len()));
+        }
+        self.cpu.bus.boot_rom = boot_rom;
+        self.cpu.bus.cart.data = cart_file;
+        self.cpu.reset();
+        Ok(())
     }
 
     /// Runs one frame: 262 lines of 455 CPU cycles, with vertical blank at line 240.
@@ -217,6 +250,18 @@ mod tests {
         }
         assert_eq!(read(&mut bus, 1), spec::LOW_VECTOR_ROM[1]);
         assert_eq!(read(&mut bus, spec::VRAM_END + 1), 0xFF, "reserved I/O reads $FF");
+    }
+
+    #[test]
+    fn settings_ram_keeps_what_is_written() {
+        let mut bus = SystemBus::default();
+        assert!(!bus.nvram_dirty);
+        bus.write(Addr::new(NVRAM_BASE + 2), 0x63);
+        assert_eq!(read(&mut bus, NVRAM_BASE + 2), 0x63);
+        assert_eq!(bus.nvram[2], 0x63);
+        assert!(bus.nvram_dirty, "a write marks it for saving");
+        assert_eq!(read(&mut bus, NVRAM_BASE - 1), 0xFF, "the reserved block around it is unchanged");
+        assert_eq!(read(&mut bus, NVRAM_BASE + NVRAM_LEN as u32), 0xFF);
     }
 
     #[test]
