@@ -1,0 +1,40 @@
+PARADOX63 BIOS PROPRIETARY LICENSE
+
+Copyright (c) 2026 dotslashCosmic. All rights reserved.
+
+This license covers the Paradox63 BIOS: the file bios.bin and the boot ROM
+program inside it (the "BIOS"). It does not cover the Paradox63 emulator, which
+is licensed separately under the GNU General Public License, version 3.
+
+1. You may
+   - use the BIOS, free of charge, with the Paradox63 emulator or with
+     Paradox63-compatible hardware;
+   - copy and share the official, unmodified bios.bin, free of charge, as long
+     as this license goes with it.
+
+2. You may not
+   - modify the BIOS, or share a modified copy;
+   - decompile, disassemble or reverse engineer the BIOS, or extract its
+     program, keys or data, except where the law allows it regardless of this
+     license;
+   - sell the BIOS, or include it in anything you sell, without written
+     permission;
+   - remove or change this license or any copyright notice.
+
+3. Ownership
+   The BIOS is licensed, not sold. All rights not granted here are reserved.
+
+4. Cartridges
+   Programs you write for the Paradox63 are yours. Running them on the BIOS
+   does not make them subject to this license.
+
+5. No warranty
+   THE BIOS IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR
+   OTHER LIABILITY ARISING FROM THE USE OF THE BIOS.
+
+6. Ending
+   This license ends automatically if you break its terms. You must then stop
+   using the BIOS and delete your copies.
+
+SPDX-License-Identifier: LicenseRef-Paradox63-BIOS-Proprietary
