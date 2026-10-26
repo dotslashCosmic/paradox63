@@ -18,6 +18,12 @@ pub struct SystemBus {
     pub nvram: [u8; NVRAM_LEN],
     /// Set when the settings RAM was written, so the frontend can save it.
     pub nvram_dirty: bool,
+    /// Set by a write to `SYS_LOCK`: the boot ROM reads $FF until the next reset.
+    pub boot_locked: bool,
+    /// The last value written to `SYS_RESET`, kept over the reset (0 at power-on).
+    pub reset_reason: u8,
+    /// A write to `SYS_RESET` waiting for the machine to act on it.
+    pub reset_requested: bool,
     pub video: Video,
     pub keyboard: Keyboard,
     pub cart: CartPort,
@@ -31,6 +37,9 @@ impl Default for SystemBus {
             boot_rom: Vec::new(),
             nvram: [0; NVRAM_LEN],
             nvram_dirty: false,
+            boot_locked: false,
+            reset_reason: 0,
+            reset_requested: false,
             video: Video::default(),
             keyboard: Keyboard::default(),
             cart: CartPort::default(),
@@ -57,6 +66,11 @@ pub const NVRAM_BASE: u32 = 0xFF_FE80;
 pub const NVRAM_LEN: usize = 64;
 const NVRAM_END: u32 = NVRAM_BASE + NVRAM_LEN as u32 - 1;
 
+/// Any write hides the boot ROM until the next reset; reads 1 while hidden.
+pub const SYS_LOCK: u32 = 0xFF_FED0;
+/// Any write resets the console; reads the value last written (0 at power-on).
+pub const SYS_RESET: u32 = 0xFF_FED1;
+
 fn within(a: u32, base: u32, end: u32) -> bool {
     (base..=end).contains(&a)
 }
@@ -70,7 +84,11 @@ impl Bus for SystemBus {
             self.ram[a as usize]
         } else if within(a, spec::BOOT_ROM, spec::CART_WIN - 1) {
             // without a boot ROM image the high-level boot does its job
-            self.boot_rom.get((a - spec::BOOT_ROM) as usize).copied().unwrap_or(0xFF)
+            if self.boot_locked {
+                0xFF
+            } else {
+                self.boot_rom.get((a - spec::BOOT_ROM) as usize).copied().unwrap_or(0xFF)
+            }
         } else if within(a, spec::CART_WIN, spec::CART_WIN_END) {
             self.cart.window(a - spec::CART_WIN)
         } else if within(a, spec::VIDEO_IO_BASE, spec::VIDEO_IO_END) {
@@ -83,6 +101,10 @@ impl Bus for SystemBus {
             self.cart.read(a - spec::CART_STAT)
         } else if within(a, NVRAM_BASE, NVRAM_END) {
             self.nvram[(a - NVRAM_BASE) as usize]
+        } else if a == SYS_LOCK {
+            u8::from(self.boot_locked)
+        } else if a == SYS_RESET {
+            self.reset_reason
         } else if within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // reserved I/O
             0xFF
@@ -97,6 +119,11 @@ impl Bus for SystemBus {
         if within(a, NVRAM_BASE, NVRAM_END) {
             self.nvram[(a - NVRAM_BASE) as usize] = value;
             self.nvram_dirty = true;
+        } else if a == SYS_LOCK {
+            self.boot_locked = true;
+        } else if a == SYS_RESET {
+            self.reset_reason = value;
+            self.reset_requested = true;
         } else if a < 4 || within(a, spec::BOOT_ROM, spec::CART_WIN_END) || within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // ROM, the cart window and reserved I/O ignore writes
         } else if a <= spec::MAIN_TOP {
@@ -176,6 +203,18 @@ impl Machine {
         Ok(())
     }
 
+    /// The reset line: the CPU starts over from RESET, the boot ROM shows again and the
+    /// chips go back to power-on. RAM, settings RAM and the reset reason stay.
+    pub fn reset(&mut self) {
+        let bus = &mut self.cpu.bus;
+        bus.boot_locked = false;
+        bus.reset_requested = false;
+        bus.video = Video::default();
+        bus.audio = Apu::default();
+        bus.cart.reset();
+        self.cpu.reset();
+    }
+
     /// Runs one frame: 262 lines of 455 CPU cycles, with vertical blank at line 240.
     /// Each visible line is drawn as it starts, so changes made during the frame show
     /// from the next line on.
@@ -194,6 +233,9 @@ impl Machine {
                 self.cpu.set_irq_pending(self.cpu.bus.video.irq());
                 self.cpu.set_firq_pending(self.cpu.bus.audio.firq());
                 let cycles = self.cpu.step()?.0;
+                if self.cpu.bus.reset_requested {
+                    self.reset();
+                }
                 spent += cycles;
                 self.audio_cycles += cycles;
                 while self.audio_cycles >= p63_apu::TICK_CYCLES {
@@ -262,6 +304,21 @@ mod tests {
         assert!(bus.nvram_dirty, "a write marks it for saving");
         assert_eq!(read(&mut bus, NVRAM_BASE - 1), 0xFF, "the reserved block around it is unchanged");
         assert_eq!(read(&mut bus, NVRAM_BASE + NVRAM_LEN as u32), 0xFF);
+    }
+
+    #[test]
+    fn boot_rom_hides_until_reset() {
+        let mut m = Machine::new();
+        m.cpu.bus.boot_rom = vec![0x12, 0x34];
+        assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0x12);
+        m.cpu.bus.write(Addr::new(SYS_LOCK), 0);
+        assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0xFF, "hidden once locked");
+        assert_eq!(read(&mut m.cpu.bus, SYS_LOCK), 1);
+        m.cpu.bus.write(Addr::new(SYS_LOCK + 1), 0x0B);
+        assert!(m.cpu.bus.reset_requested);
+        m.reset();
+        assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0x12, "back after a reset");
+        assert_eq!(read(&mut m.cpu.bus, SYS_RESET), 0x0B, "the reason stays");
     }
 
     #[test]
