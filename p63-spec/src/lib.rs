@@ -29,7 +29,7 @@ mod tests {
 
     #[test]
     fn spec_version_is_pinned() {
-        assert_eq!(SPEC_VERSION, "0.11.0");
+        assert_eq!(SPEC_VERSION, "0.12.0");
     }
 
     #[test]
