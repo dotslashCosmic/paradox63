@@ -6,6 +6,7 @@ SYS_TESTS:
     JSR SYS_EDGES
     JSR SYS_TIMING
     JSR SYS_AUDIO
+    JSR SYS_SPEEDS
     RTS
 
 ; Waits W x 2 cycles plus a few (DBNZ is 2 cycles)
@@ -702,6 +703,51 @@ SYS_TIMING:
     .BYTE $00
     RTS
 
+; the CPU clock: SYS_SPEED switches at the next vblank; a line stays 455 dots
+SYS_SPEEDS:
+    JSR T_SECT
+    .BYTE "SPEED", 0
+    LD A,SYS_SPEED                  ; normal from reset
+    JSR T_V8
+    .BYTE SPEED_NORMAL
+    LD A,#SPEED_TURBO               ; asked for: not until vblank
+    ST A,SYS_SPEED
+    LD A,SYS_SPEED
+    JSR T_V8
+    .BYTE SPEED_NORMAL
+    WAITV
+    LD A,SYS_SPEED
+    JSR T_V8
+    .BYTE SPEED_TURBO
+    WAITV                           ; turbo: 10236 cycles = 11.2 lines of 910
+    LD W,#5118
+.D1:
+    DBNZ W,.D1
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 251
+    LD A,#3                         ; not a speed: ignored
+    ST A,SYS_SPEED
+    WAITV
+    LD A,SYS_SPEED
+    JSR T_V8
+    .BYTE SPEED_TURBO
+    LD A,#SPEED_LOW
+    ST A,SYS_SPEED
+    WAITV                           ; low power: 2002 cycles = 8.8 lines of 227.5
+    LD W,#1000
+.D2:
+    DBNZ W,.D2
+    LD A,V_LINE
+    JSR T_V8
+    .BYTE 248
+    LD A,#SPEED_NORMAL              ; and back
+    ST A,SYS_SPEED
+    WAITV
+    LD A,SYS_SPEED
+    JSR T_V8
+    .BYTE SPEED_NORMAL
+    RTS
 ; the audio engine as the CPU sees it: voice state, envelope levels, ENDX and FIRQ
 ; Sample 0: 64 samples at $0100, one-shot or looped. Sample 1: 16 samples at $0200.
 ; One output tick is 224 cycles.
