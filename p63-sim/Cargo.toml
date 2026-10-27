@@ -19,3 +19,4 @@ getrandom = "0.2"
 clap.workspace = true
 anyhow.workspace = true
 rustyline.workspace = true
+rfd = "0.15"
