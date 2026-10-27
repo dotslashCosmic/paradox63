@@ -20,6 +20,54 @@ The Paradox63 aims to define, explore and tool an 8-bit architecture from the gr
 
 - expressive instruction sets
 
-## Includes
+## Usage
 
-An official Paradox63 BIOS ROM, a full CPU test suite, a song test, and a basic Pong game.
+The release zip has `p63-sim.exe`, the signed `bios.bin`, example `.p63c` carts, and example
+source programs in `games/` and `utils/`. Keep `bios.bin` next to the exe.
+
+As of v0.5.0, to play a cartridge, open CMD and:
+    `p63-sim play game.p63c`
+
+The console boots to its Home BIOS screen; press Start/A to run the cartridge. With no
+file it opens with an empty slot, and you can insert one from the Console menu. Includes memory(todo), and system settings.
+First cold boot will create a `.nvram` file, the console's battery backed memory.
+You can swap games at any time using shortcuts.
+
+| Key | Button |
+|-|-|
+| Arrow keys | D-pad |
+| Enter | Start |
+| Backspace or C | Select |
+| Z / X | A / B |
+| Esc | Quit |
+
+The Console menu inserts, ejects and resets cartridges, switches CPU speed
+(Low 3.58 / Normal 7.16 / Turbo 14.32 MHz), and turns the power off and on.
+Programs can switch speeds in the .p63 code.
+
+Write your own: assemble a `.p63` source file into a cartridge, then play it.
+Paradox63 has its proprietary key to sign 'Official P63 Cartridges', as shown in the Home with assets released.
+
+    p63-sim asm hello.p63 -c hello.p63c
+    p63-sim play hello.p63c
+
+Other commands:
+
+| Command | What it does |
+|-|-|
+| `asm FILE [-c out.p63c] [-o out.bin] [-s]` | Assemble; `-c` writes a cartridge, `-s` prints the symbol table |
+| `run FILE [-f FRAMES] [--hold BUTTON] [--peek ADDR:LEN] [--screenshot out.bmp] [--wav out.wav]` | Run without a window and report what happened |
+| `call FILE ROUTINE[,ROUTINE...] [A=$12 X=$2000 ...]` | Run routines and print every register and the cycle count |
+| `test ROM... [--frames N]` | Run test ROMs and print PASS or FAIL |
+
+Every command takes `--bios PATH` if the BIOS lives somewhere else. Run
+`p63-sim help COMMAND` for the full options.
+
+## Building
+
+You need Rust (stable) from https://rustup.rs.
+
+    cargo build --release -p p63-sim
+    cargo test --workspace
+
+The exe lands in `target/release/`. Put `bios.bin` from a release next to it.
