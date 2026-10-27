@@ -17,11 +17,12 @@ enum Shift {
 }
 
 impl<B: Bus> ReferenceInterpreter<B> {
-    /// Shift/rotate `reg[,#count]`, one bit at a time.
+    /// Shift/rotate `reg[,#count]`. A barrel shifter: 1 cycle by one bit, 2 by a count.
     fn exec_shift(&mut self, op: Shift, postbyte: u8) -> Result<Cycles, CpuError> {
         let Some((reg, bits, count, cycles)) = self.count_operand(postbyte) else {
             return Ok(Cycles(1));
         };
+        let cycles = cycles.min(2);
         let mask = width_mask(bits);
         let sign = sign_bit(bits);
         let mut v = self.read_register(reg)? & mask;
