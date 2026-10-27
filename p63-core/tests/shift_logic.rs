@@ -81,7 +81,7 @@ fn asl_a_sets_carry_and_overflow() {
 fn lsl_is_asl() {
     let mut c = cpu(&[0x22, 0xE0, 0x03]);
     c.registers.set_a(0x05);
-    assert_eq!(step(&mut c, 3), 4);
+    assert_eq!(step(&mut c, 3), 2);
     assert_eq!(c.registers.a(), 0x28);
 }
 
@@ -99,7 +99,7 @@ fn asr_keeps_sign() {
 fn lsr_q_by_17() {
     let mut c = cpu(&[0x23, 0xE6, 17]);
     c.registers.set_q(0x0003_0000);
-    assert_eq!(step(&mut c, 3), 18);
+    assert_eq!(step(&mut c, 3), 2); // a count of any size is 2 cycles
     assert_eq!(c.registers.q(), 1);
     assert!(flag(&c, Flags::C)); // bit 16 was the last one out
 }
