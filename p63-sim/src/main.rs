@@ -4,10 +4,12 @@
 //! `call` assembles a file, calls one routine with the given registers and
 //!        prints the registers it returns with.
 //! `run`  boots a program or cartridge on the full machine for N frames.
-//! `play` boots it in a window with the keyboard as the gamepad, with sound.
+//! `play` opens the console in a window: the keyboard as the gamepad, sound, and the
+//!        front panel (cartridge slot, power, reset, CPU speed) as menus.
 //! `test` runs test ROMs (built on games/tests/testlib.p63) and reports pass or fail.
 
 mod audio;
+mod window;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -43,10 +45,10 @@ enum Command {
         #[arg(long, requires = "cart")]
         encrypt: bool,
     },
-    /// Play a cartridge in a window, booted through the BIOS.
+    /// Open the console in a window, with this cartridge in the slot (or none).
     /// Arrows = D-pad, Enter = Start, Backspace/C = Select, Z/X = A/B, Esc = quit
     Play {
-        file: PathBuf,
+        file: Option<PathBuf>,
         /// Print a line a second: fps and where each frame's time went
         #[arg(long)]
         stats: bool,
@@ -98,7 +100,7 @@ fn main() -> ExitCode {
         Command::Asm { file, output, symbols, cart, encrypt } => {
             asm(&file, output.as_deref(), symbols, cart.as_deref(), encrypt)
         }
-        Command::Play { file, stats } => play(&file, bios, stats),
+        Command::Play { file, stats } => window::play(file.as_deref(), bios, stats),
         Command::Run { file, frames, peek, hold, screenshot, wav } => {
             run(&file, bios, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
         }
@@ -307,11 +309,10 @@ fn save_bmp(path: &Path, pixels: &[u32], width: usize, height: usize) -> Result<
     std::fs::write(path, out).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// What `run` and `play` show about the cartridge they booted, and the BIOS that booted it.
+/// What `run` shows about the cartridge it booted.
 struct BootInfo {
     title: String,
     image_len: usize,
-    bios: PathBuf,
 }
 
 /// Boots a cartridge the way the console does: through the BIOS, which checks it and
@@ -329,8 +330,8 @@ fn boot(file: &Path, bios: Option<&Path>) -> Result<(p63_bus::Machine, BootInfo)
     let cart = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let bios = find_bios(bios)?;
     let info = match p63_cart::Cart::parse(cart.clone()) {
-        Ok(c) => BootInfo { title: c.title.clone(), image_len: c.image().len(), bios: bios.clone() },
-        Err(e) => BootInfo { title: format!("bad cartridge, {e}"), image_len: 0, bios: bios.clone() },
+        Ok(c) => BootInfo { title: c.title.clone(), image_len: c.image().len() },
+        Err(e) => BootInfo { title: format!("bad cartridge, {e}"), image_len: 0 },
     };
     let mut machine = p63_bus::Machine::new();
     machine.boot_with_rom(load_bios(&bios)?, cart)?;
@@ -472,58 +473,6 @@ impl Drop for FineTimer {
 /// Where a boot ROM's settings RAM is kept between runs: next to it, as .nvram.
 fn nvram_path(bios: &Path) -> PathBuf {
     bios.with_extension("nvram")
-}
-
-fn play(file: &Path, bios: Option<&Path>, stats: bool) -> Result<(), String> {
-    use minifb::{Key, Scale, Window, WindowOptions};
-    use std::time::Instant;
-    let keys = [
-        (Key::Up, 0x08),
-        (Key::Down, 0x04),
-        (Key::Left, 0x02),
-        (Key::Right, 0x01),
-        (Key::Enter, 0x20),
-        (Key::Backspace, 0x10),
-        (Key::C, 0x10),
-        (Key::Z, 0x80),
-        (Key::X, 0x40),
-    ];
-    let (mut machine, info) = boot(file, bios)?;
-    let nvram = Some(nvram_path(&info.bios));
-    if let Some(saved) = nvram.as_ref().and_then(|p| std::fs::read(p).ok()) {
-        let n = saved.len().min(p63_bus::NVRAM_LEN);
-        machine.cpu.bus.nvram[..n].copy_from_slice(&saved[..n]);
-    }
-    let (w, h) = (p63_ppu::WIDTH, p63_ppu::HEIGHT);
-    let options = WindowOptions { scale: Scale::X2, resize: true, ..WindowOptions::default() };
-    let mut window = Window::new(&format!("Paradox63 - {}", info.title), w, h, options).map_err(|e| e.to_string())?;
-    let speaker = audio::Speaker::open().map_err(|e| eprintln!("no sound: {e}")).ok();
-    // frames run on their own steady clock; the sound follows it (see audio.rs)
-    window.set_target_fps(0);
-    let _timer = FineTimer::new();
-    let mut clock = FrameClock::new();
-    let mut timing = Stats::default();
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        let t0 = Instant::now();
-        clock.wait();
-        let t1 = Instant::now();
-        machine.cpu.bus.keyboard.pad[0] = keys.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
-        machine.run_frame().map_err(|e| format!("frame {}, at ${:06X}: {e}", machine.frames, machine.cpu.registers.pc()))?;
-        if let Some(path) = nvram.as_ref().filter(|_| machine.cpu.bus.nvram_dirty) {
-            machine.cpu.bus.nvram_dirty = false;
-            std::fs::write(path, machine.cpu.bus.nvram).map_err(|e| format!("{}: {e}", path.display()))?;
-        }
-        if let Some(speaker) = &speaker {
-            speaker.push(&machine.audio);
-        }
-        let t2 = Instant::now();
-        window.update_with_buffer(&machine.frame, w, h).map_err(|e| e.to_string())?;
-        if stats {
-            let queued = speaker.as_ref().map_or(0, audio::Speaker::queued);
-            timing.frame(t1 - t0, t2 - t1, t2.elapsed(), queued);
-        }
-    }
-    Ok(())
 }
 
 fn run(
