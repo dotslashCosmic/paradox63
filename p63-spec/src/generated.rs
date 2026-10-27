@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
-pub const SPEC_VERSION: &str = "0.11.0";
+pub const SPEC_VERSION: &str = "0.12.0";
 pub const CLOCK_HZ: u32 = 7159090;
+pub const MASTER_CLOCK_HZ: u32 = 14318180;
 pub const AUDIO_SAMPLE_DIV: u32 = 224;
 pub const DOTS_PER_LINE: u32 = 455;
 pub const LINES_PER_FRAME: u32 = 262;
@@ -257,6 +258,12 @@ pub const ENGINE_CTRL: u32 = 0xFFFE43;
 pub const NVRAM_BASE: u32 = 0xFFFE80;
 pub const SYS_LOCK: u32 = 0xFFFED0;
 pub const SYS_RESET: u32 = 0xFFFED1;
+pub const RESET_PANEL: u32 = 0xF0;
+pub const RESET_SLOT: u32 = 0xF1;
+pub const SYS_SPEED: u32 = 0xFFFED2;
+pub const SPEED_NORMAL: u32 = 0;
+pub const SPEED_TURBO: u32 = 1;
+pub const SPEED_LOW: u32 = 2;
 pub const ENGINE_CHECK: u32 = 0x01;
 pub const ENGINE_LOAD: u32 = 0x02;
 pub const ENGINE_OK: u32 = 0x01;
@@ -301,14 +308,14 @@ pub const OPCODES: [OpInfo; 256] = [
     OpInfo { opcode: 0x1D, group: "Arithmetic", mnemonic: "DIV", operands: "D,E", cycles: "5", legal: true },
     OpInfo { opcode: 0x1E, group: "Arithmetic", mnemonic: "MOD", operands: "D,E", cycles: "5", legal: true },
     OpInfo { opcode: 0x1F, group: "Arithmetic", mnemonic: "CLR", operands: "A", cycles: "1", legal: true },
-    OpInfo { opcode: 0x20, group: "Shifts, Rotates, Extensions", mnemonic: "ASL", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x21, group: "Shifts, Rotates, Extensions", mnemonic: "ASR", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x22, group: "Shifts, Rotates, Extensions", mnemonic: "LSL", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x23, group: "Shifts, Rotates, Extensions", mnemonic: "LSR", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x24, group: "Shifts, Rotates, Extensions", mnemonic: "ROL", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x25, group: "Shifts, Rotates, Extensions", mnemonic: "ROR", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x26, group: "Shifts, Rotates, Extensions", mnemonic: "RCL", operands: "reg,#count", cycles: "1+n", legal: true },
-    OpInfo { opcode: 0x27, group: "Shifts, Rotates, Extensions", mnemonic: "RCR", operands: "reg,#count", cycles: "1+n", legal: true },
+    OpInfo { opcode: 0x20, group: "Shifts, Rotates, Extensions", mnemonic: "ASL", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x21, group: "Shifts, Rotates, Extensions", mnemonic: "ASR", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x22, group: "Shifts, Rotates, Extensions", mnemonic: "LSL", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x23, group: "Shifts, Rotates, Extensions", mnemonic: "LSR", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x24, group: "Shifts, Rotates, Extensions", mnemonic: "ROL", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x25, group: "Shifts, Rotates, Extensions", mnemonic: "ROR", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x26, group: "Shifts, Rotates, Extensions", mnemonic: "RCL", operands: "reg,#count", cycles: "1-2", legal: true },
+    OpInfo { opcode: 0x27, group: "Shifts, Rotates, Extensions", mnemonic: "RCR", operands: "reg,#count", cycles: "1-2", legal: true },
     OpInfo { opcode: 0x28, group: "Shifts, Rotates, Extensions", mnemonic: "TST", operands: "reg", cycles: "1", legal: true },
     OpInfo { opcode: 0x29, group: "Shifts, Rotates, Extensions", mnemonic: "BIT", operands: "dest,src", cycles: "1-2", legal: true },
     OpInfo { opcode: 0x2A, group: "Shifts, Rotates, Extensions", mnemonic: "COM", operands: "reg", cycles: "1", legal: true },
