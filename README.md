@@ -12,7 +12,7 @@ The Paradox63 aims to define, explore and tool an 8-bit architecture from the gr
 
 - CPU/core logic
 
-- assembler and disassembler tools
+- assembler and testing tools
 
 - CPU emulator
 
