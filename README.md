@@ -28,8 +28,9 @@ source programs in `games/` and `utils/`. Keep `bios.bin` next to the exe.
 As of v0.5.0, to play a cartridge, open CMD and:
     `p63-sim play game.p63c`
 
-The console boots to its Home BIOS screen; press Start/A to run the cartridge. With no
-file it opens with an empty slot, and you can insert one from the Console menu. Includes memory(todo), and system settings.
+The console boots to its Home BIOS screen; press Start/A to run the cartridge.
+Hold `Select` during the startup logo to skip to the Home BIOS screen.
+With no file it opens with an empty slot, and you can insert one from the Console menu. Includes memory(todo), and system settings.
 First cold boot will create a `.nvram` file, the console's battery backed memory.
 You can swap games at any time using shortcuts.
 
