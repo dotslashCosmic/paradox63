@@ -254,6 +254,12 @@ ENGINE_CTRL     EQU $FFFE43
 NVRAM_BASE      EQU $FFFE80     ; 64 bytes
 SYS_LOCK        EQU $FFFED0
 SYS_RESET       EQU $FFFED1
+RESET_PANEL     EQU $F0        ; SYS_RESET reasons from the front panel: the reset button,
+RESET_SLOT      EQU $F1        ; and the cartridge taken out or changed
+SYS_SPEED       EQU $FFFED2     ; CPU clock, switched at the next vblank:
+SPEED_NORMAL    EQU 0          ; 7.16 MHz (power-on)
+SPEED_TURBO     EQU 1          ; 14.32 MHz
+SPEED_LOW       EQU 2          ; 3.58 MHz
 ENGINE_CHECK    EQU $01
 ENGINE_LOAD     EQU $02
 ENGINE_OK       EQU $01     ; status: done
