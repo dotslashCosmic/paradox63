@@ -13,7 +13,7 @@ use p63_spec as spec;
 pub struct SystemBus {
     ram: Vec<u8>,
     /// Boot ROM image at `BOOT_ROM`; empty when the high-level boot is used.
-    pub boot_rom: Vec<u8>,
+    pub boot_rom: bios::BootRom,
     /// Battery-backed settings RAM at `NVRAM_BASE`, kept by the boot ROM.
     pub nvram: [u8; NVRAM_LEN],
     /// Set when the settings RAM was written, so the frontend can save it.
@@ -24,6 +24,13 @@ pub struct SystemBus {
     pub reset_reason: u8,
     /// A write to `SYS_RESET` waiting for the machine to act on it.
     pub reset_requested: bool,
+    /// The CPU clock in use (`SPEED_NORMAL`, `SPEED_TURBO` or `SPEED_LOW`).
+    pub speed: u8,
+    /// The clock the program picked, and a pick waiting for the next vblank.
+    pub speed_program: u8,
+    pub speed_requested: Option<u8>,
+    /// The front panel's speed switch: forces a clock whatever the program asks for.
+    pub speed_forced: Option<u8>,
     pub engine: Engine,
     /// Cycles the engine took from the CPU, still to be counted.
     pub stall: u32,
@@ -37,12 +44,16 @@ impl Default for SystemBus {
     fn default() -> Self {
         Self {
             ram: vec![0; 0x0100_0000],
-            boot_rom: Vec::new(),
+            boot_rom: bios::BootRom::default(),
             nvram: [0; NVRAM_LEN],
             nvram_dirty: false,
             boot_locked: false,
             reset_reason: 0,
             reset_requested: false,
+            speed: SPEED_NORMAL,
+            speed_program: SPEED_NORMAL,
+            speed_requested: None,
+            speed_forced: None,
             engine: Engine::default(),
             stall: 0,
             video: Video::default(),
@@ -126,7 +137,21 @@ const ENGINE_SEAL_CYCLES: u32 = 20_000;
 
 /// Any write hides the boot ROM until the next reset; reads 1 while hidden.
 /// Any write to `SYS_RESET` resets the console; it reads the value last written.
-pub use spec::{SYS_LOCK, SYS_RESET};
+/// `SYS_SPEED` picks the CPU clock from the next vblank and reads the one in use.
+pub use spec::{SYS_LOCK, SYS_RESET, SYS_SPEED};
+pub const SPEED_NORMAL: u8 = spec::SPEED_NORMAL as u8;
+pub const SPEED_TURBO: u8 = spec::SPEED_TURBO as u8;
+pub const SPEED_LOW: u8 = spec::SPEED_LOW as u8;
+
+/// Master clock ticks per CPU cycle at a speed: the master clock is twice the dot clock.
+#[must_use]
+pub fn ticks_per_cycle(speed: u8) -> u32 {
+    match speed {
+        SPEED_TURBO => 1,
+        SPEED_LOW => 4,
+        _ => 2,
+    }
+}
 
 /// The cartridge engine's state. Its keys can be written, never read, and are wiped
 /// when the boot ROM locks.
@@ -155,7 +180,7 @@ impl Bus for SystemBus {
             if self.boot_locked {
                 0xFF
             } else {
-                self.boot_rom.get((a - spec::BOOT_ROM) as usize).copied().unwrap_or(0xFF)
+                self.boot_rom.get((a - spec::BOOT_ROM) as usize).unwrap_or(0xFF)
             }
         } else if within(a, spec::CART_WIN, spec::CART_WIN_END) {
             self.cart.window(a - spec::CART_WIN)
@@ -177,6 +202,8 @@ impl Bus for SystemBus {
             u8::from(self.boot_locked)
         } else if a == SYS_RESET {
             self.reset_reason
+        } else if a == SYS_SPEED {
+            self.speed
         } else if within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // reserved I/O
             0xFF
@@ -210,6 +237,10 @@ impl Bus for SystemBus {
         } else if a == SYS_RESET {
             self.reset_reason = value;
             self.reset_requested = true;
+        } else if a == SYS_SPEED {
+            if matches!(value, SPEED_NORMAL | SPEED_TURBO | SPEED_LOW) {
+                self.speed_requested = Some(value);
+            }
         } else if a < 4 || within(a, spec::BOOT_ROM, spec::CART_WIN_END) || within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // ROM, the cart window and reserved I/O ignore writes
         } else if a <= spec::MAIN_TOP {
@@ -228,8 +259,10 @@ impl Bus for SystemBus {
     }
 }
 
-/// CPU cycles per scanline: the CPU runs one cycle per dot.
+/// CPU cycles per scanline at normal speed, where the CPU runs one cycle per dot.
 pub const CYCLES_PER_LINE: u32 = spec::DOTS_PER_LINE;
+/// Master clock ticks per scanline.
+const TICKS_PER_LINE: u32 = spec::DOTS_PER_LINE * 2;
 
 /// The whole console: CPU, memory map and devices.
 pub struct Machine {
@@ -239,10 +272,10 @@ pub struct Machine {
     pub frame: Vec<u32>,
     /// Stereo samples from the last frame, `p63_apu::SAMPLE_RATE` per second.
     pub audio: Vec<(i16, i16)>,
-    /// Cycles run past the end of the last line, carried into the next.
+    /// Master ticks run past the end of the last line, carried into the next.
     debt: u32,
-    /// Cycles since the last audio tick.
-    audio_cycles: u32,
+    /// Master ticks since the last audio tick.
+    audio_ticks: u32,
 }
 
 impl Default for Machine {
@@ -260,7 +293,7 @@ impl Machine {
             frame: vec![0; p63_ppu::WIDTH * p63_ppu::HEIGHT],
             audio: Vec::new(),
             debt: 0,
-            audio_cycles: 0,
+            audio_ticks: 0,
         }
     }
 
@@ -283,7 +316,7 @@ impl Machine {
         if boot_rom.len() > size {
             return Err(format!("boot ROM is {} bytes; the slot holds {size}", boot_rom.len()));
         }
-        self.cpu.bus.boot_rom = boot_rom;
+        self.cpu.bus.boot_rom = bios::BootRom::new(boot_rom);
         self.cpu.bus.cart.data = cart_file;
         self.cpu.reset();
         Ok(())
@@ -295,6 +328,9 @@ impl Machine {
         let bus = &mut self.cpu.bus;
         bus.boot_locked = false;
         bus.reset_requested = false;
+        bus.speed_program = SPEED_NORMAL;
+        bus.speed_requested = None;
+        bus.speed = bus.speed_forced.unwrap_or(SPEED_NORMAL);
         bus.engine = Engine::default();
         bus.video = Video::default();
         bus.audio = Apu::default();
@@ -302,7 +338,8 @@ impl Machine {
         self.cpu.reset();
     }
 
-    /// Runs one frame: 262 lines of 455 CPU cycles, with vertical blank at line 240.
+    /// Runs one frame: 262 lines of 455 dots, with vertical blank at line 240. A line is
+    /// 455 CPU cycles at normal speed, 910 in turbo and 227.5 in low power.
     /// Each visible line is drawn as it starts, so changes made during the frame show
     /// from the next line on.
     pub fn run_frame(&mut self) -> Result<(), CpuError> {
@@ -312,29 +349,40 @@ impl Machine {
             if usize::from(line) < p63_ppu::HEIGHT {
                 self.render_line(usize::from(line));
             } else if line == spec::SCREEN_H as u16 {
+                self.switch_speed();
                 self.cpu.signal_vblank();
             }
             let mut spent = self.debt;
-            while spent < CYCLES_PER_LINE {
-                self.cpu.bus.video.dot = spent;
+            while spent < TICKS_PER_LINE {
+                self.cpu.bus.video.dot = spent / 2;
                 self.cpu.set_irq_pending(self.cpu.bus.video.irq());
                 self.cpu.set_firq_pending(self.cpu.bus.audio.firq());
                 let cycles = self.cpu.step()?.0 + std::mem::take(&mut self.cpu.bus.stall);
                 if self.cpu.bus.reset_requested {
                     self.reset();
                 }
-                spent += cycles;
-                self.audio_cycles += cycles;
-                while self.audio_cycles >= p63_apu::TICK_CYCLES {
-                    self.audio_cycles -= p63_apu::TICK_CYCLES;
+                let ticks = cycles * ticks_per_cycle(self.cpu.bus.speed);
+                spent += ticks;
+                self.audio_ticks += ticks;
+                while self.audio_ticks >= p63_apu::TICK_CYCLES * 2 {
+                    self.audio_ticks -= p63_apu::TICK_CYCLES * 2;
                     let sample = self.cpu.bus.audio_tick();
                     self.audio.push(sample);
                 }
             }
-            self.debt = spent - CYCLES_PER_LINE;
+            self.debt = spent - TICKS_PER_LINE;
         }
         self.frames += 1;
         Ok(())
+    }
+
+    /// At vblank: the front panel's switch if it's set, else what the program asked for.
+    fn switch_speed(&mut self) {
+        let bus = &mut self.cpu.bus;
+        if let Some(asked) = bus.speed_requested.take() {
+            bus.speed_program = asked;
+        }
+        bus.speed = bus.speed_forced.unwrap_or(bus.speed_program);
     }
 
     /// Draws one line from VRAM, OAM and the registers as they stand now.
@@ -396,7 +444,7 @@ mod tests {
     #[test]
     fn boot_rom_hides_until_reset() {
         let mut m = Machine::new();
-        m.cpu.bus.boot_rom = vec![0x12, 0x34];
+        m.cpu.bus.boot_rom = bios::BootRom::new(vec![0x12, 0x34]);
         assert_eq!(read(&mut m.cpu.bus, spec::BOOT_ROM), 0x12);
         assert_eq!(m.cpu.bus.peek(Addr::new(spec::BOOT_ROM)), 0xFF, "tools never see it");
         m.cpu.bus.write(Addr::new(SYS_LOCK), 0);
