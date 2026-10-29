@@ -1,4 +1,4 @@
-//! The `play` window: the screen, the keyboard as the pad, and the console's front
+//! The `play` window: the screen, the PC's input devices, and the console's front
 //! panel as menus (cartridge slot, power, reset, the CPU speed switch).
 
 use std::path::{Path, PathBuf};
@@ -8,19 +8,8 @@ use minifb::{Key, Menu, MenuHandle, Scale, Window, WindowOptions, MENU_KEY_CTRL}
 use p63_bus::{Machine, SPEED_LOW, SPEED_NORMAL, SPEED_TURBO};
 use p63_spec::{RESET_PANEL, RESET_SLOT};
 
-use super::{audio, find_bios, is_source, load_bios, nvram_path, FineTimer, FrameClock, Stats};
-
-const PAD: [(Key, u8); 9] = [
-    (Key::Up, 0x08),
-    (Key::Down, 0x04),
-    (Key::Left, 0x02),
-    (Key::Right, 0x01),
-    (Key::Enter, 0x20),
-    (Key::Backspace, 0x10),
-    (Key::C, 0x10),
-    (Key::Z, 0x80),
-    (Key::X, 0x40),
-];
+use super::input::{Ports, CONTROLS_TEXT};
+use super::{audio, find_bios, is_source, load_bios, nvram_path, read_card, write_card, FineTimer, FrameClock, Stats};
 
 // menu item ids
 const INSERT: usize = 1;
@@ -32,11 +21,16 @@ const SPEED_AUTO: usize = 10;
 const SPEED_IDS: [(usize, u8); 3] = [(11, SPEED_LOW), (12, SPEED_NORMAL), (13, SPEED_TURBO)];
 const CONTROLS: usize = 20;
 const ABOUT: usize = 21;
+// + the slot, 0 or 1
+const CARD_INSERT: usize = 30;
+const CARD_NEW: usize = 32;
+const CARD_EJECT: usize = 34;
+const CARD_LABEL: usize = 36;
+/// Frames a card must go unwritten before its file is saved, so a save in progress is
+/// written once, at its end.
+const CARD_SETTLE: u32 = 30;
 const RECENT: usize = 100;
 const RECENT_MAX: usize = 5;
-
-const CONTROLS_TEXT: &str = "Pad\n  Arrows: D-pad\n  Z / X: A / B\n  Enter: Start\n  Backspace or C: Select\n\n\
-Console\n  Ctrl+O: insert a cartridge\n  Ctrl+E: eject\n  Ctrl+R: reset\n  Ctrl+P: power off / on\n  Esc: quit";
 
 fn mhz(speed: u8) -> &'static str {
     match speed {
@@ -87,6 +81,10 @@ struct Console {
     /// The speed switch: `None` lets the program pick.
     forced: Option<u8>,
     recent: Vec<PathBuf>,
+    /// The memory card files in the two card slots.
+    cards: [Option<PathBuf>; 2],
+    /// Frames until a written card is saved to its file (0: nothing waiting).
+    card_wait: [u32; 2],
 }
 
 impl Console {
@@ -94,6 +92,11 @@ impl Console {
         let mut m = Machine::new();
         let cart = self.slot.as_ref().map(|s| s.data.clone()).unwrap_or_default();
         m.boot_with_rom(self.rom.clone(), cart)?;
+        for (slot, path) in self.cards.iter().enumerate() {
+            if let Some(path) = path {
+                m.cpu.bus.cart.insert_card(slot, read_card(path)?);
+            }
+        }
         if let Ok(saved) = std::fs::read(nvram_path(&self.bios)) {
             let n = saved.len().min(p63_bus::NVRAM_LEN);
             m.cpu.bus.nvram[..n].copy_from_slice(&saved[..n]);
@@ -108,12 +111,74 @@ impl Console {
     /// running, changing it resets the console to Home, so no program sees its ROM change.
     fn swap_cart(&mut self) {
         let data = self.slot.as_ref().map(|s| s.data.clone()).unwrap_or_default();
-        if let Some(m) = &mut self.machine {
-            m.cpu.bus.cart.data = data;
+        if let Some(mut m) = self.machine.take() {
+            m.cpu.bus.cart.insert(data);
             if m.cpu.bus.boot_locked {
-                panel_reset(m, RESET_SLOT);
+                panel_reset(&mut m, RESET_SLOT);
+            }
+            self.machine = Some(m);
+        }
+    }
+
+    /// Saves card `slot` to its file now if it has changes waiting.
+    fn flush_card(&mut self, slot: usize) -> Result<(), String> {
+        if self.card_wait[slot] == 0 {
+            return Ok(());
+        }
+        self.card_wait[slot] = 0;
+        match (&self.cards[slot], self.machine.as_ref().and_then(|m| m.cpu.bus.cart.cards[slot].as_ref())) {
+            (Some(path), Some(card)) => write_card(path, &card.data),
+            _ => Ok(()),
+        }
+    }
+
+    fn flush_cards(&mut self) -> Result<(), String> {
+        self.flush_card(0)?;
+        self.flush_card(1)
+    }
+
+    /// After a frame: a card the program wrote is saved once it has been left alone a while.
+    fn settle_cards(&mut self) -> Result<(), String> {
+        for slot in 0..2 {
+            if let Some(card) = self.machine.as_mut().and_then(|m| m.cpu.bus.cart.cards[slot].as_mut()) {
+                if std::mem::take(&mut card.dirty) {
+                    self.card_wait[slot] = CARD_SETTLE;
+                    continue;
+                }
+            }
+            if self.card_wait[slot] == 1 {
+                self.flush_card(slot)?;
+            } else {
+                self.card_wait[slot] = self.card_wait[slot].saturating_sub(1);
             }
         }
+        Ok(())
+    }
+
+    /// Puts a card file in a slot, taking out whatever was there. A running console
+    /// sees it go in at once.
+    fn insert_card(&mut self, slot: usize, path: PathBuf) -> Result<(), String> {
+        let data = read_card(&path)?;
+        self.eject_card(slot)?;
+        if !path.exists() {
+            write_card(&path, &data)?;
+        }
+        if let Some(m) = &mut self.machine {
+            m.cpu.bus.cart.insert_card(slot, data);
+        }
+        self.cards[slot] = Some(path);
+        save_cards(&self.bios, &self.cards);
+        Ok(())
+    }
+
+    fn eject_card(&mut self, slot: usize) -> Result<(), String> {
+        self.flush_card(slot)?;
+        if let Some(m) = &mut self.machine {
+            m.cpu.bus.cart.eject_card(slot);
+        }
+        self.cards[slot] = None;
+        save_cards(&self.bios, &self.cards);
+        Ok(())
     }
 
     fn insert(&mut self, slot: Slot) {
@@ -149,19 +214,40 @@ impl Console {
         let cart = self.slot.as_ref().map_or("none".to_string(), |s| format!("{} ({})", s.title, s.kind));
         let speed = match (&self.machine, self.forced) {
             (None, _) => "power off".to_string(),
-            (Some(m), None) => format!("{} (picked by the program)", mhz(m.cpu.bus.speed)),
-            (Some(m), Some(_)) => format!("{} (speed switch)", mhz(m.cpu.bus.speed)),
+            (Some(m), _) => mhz(m.cpu.bus.speed).to_string(),
         };
         let bios = self.bios.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         format!(
-            "Paradox63 simulator {}\nHardware spec {}\n\nBIOS: {bios} (signature verified)\nCartridge: {cart}\nCPU: {speed}\n\n\
+            "Paradox63 simulator {}\nHardware spec {}\n\nBIOS: {bios} (signature verified)\nCartridge: {cart}\n\
+             Memory card 1: {}\nMemory card 2: {}\nCPU: {speed}\n\n\
              The simulator is free software under the GNU GPL v3.\nThe BIOS is proprietary; see BIOS_LICENSE.",
             env!("CARGO_PKG_VERSION"),
-            p63_spec::SPEC_VERSION
+            p63_spec::SPEC_VERSION,
+            self.card_name(0),
+            self.card_name(1),
         )
     }
 
-    fn menus(&self) -> (Menu, Menu) {
+    fn card_name(&self, slot: usize) -> String {
+        self.cards[slot].as_ref().and_then(|p| p.file_name()).map_or("none".into(), |n| n.to_string_lossy().into_owned())
+    }
+
+    fn card_menu(&self) -> Menu {
+        let mut cards = Menu::new("Memory Cards").expect("menu");
+        for slot in 0..2 {
+            if slot == 1 {
+                cards.add_separator();
+            }
+            let n = slot + 1;
+            cards.add_item(&format!("Slot {n}: {}", self.card_name(slot)), CARD_LABEL + slot).enabled(false).build();
+            cards.add_item(&format!("Insert Card in Slot {n}..."), CARD_INSERT + slot).build();
+            cards.add_item(&format!("New Card in Slot {n}..."), CARD_NEW + slot).build();
+            cards.add_item(&format!("Eject Card {n}"), CARD_EJECT + slot).enabled(self.cards[slot].is_some()).build();
+        }
+        cards
+    }
+
+    fn menus(&self) -> (Menu, Menu, Menu) {
         let mut console = Menu::new("Console").expect("menu");
         console.add_item("Insert Cartridge...", INSERT).shortcut(Key::O, MENU_KEY_CTRL).build();
         if !self.recent.is_empty() {
@@ -179,7 +265,7 @@ impl Console {
         console.add_separator();
         let mut speed = Menu::new("CPU Speed").expect("menu");
         let mark = |on: bool, label: &str| if on { format!("> {label}") } else { format!("   {label}") };
-        speed.add_item(&mark(self.forced.is_none(), "Auto (the program picks)"), SPEED_AUTO).build();
+        speed.add_item(&mark(self.forced.is_none(), "Auto"), SPEED_AUTO).build();
         for (id, s) in SPEED_IDS {
             let name = match s {
                 SPEED_LOW => "Low power, 3.58 MHz",
@@ -194,7 +280,7 @@ impl Console {
         let mut help = Menu::new("Help").expect("menu");
         help.add_item("Controls", CONTROLS).build();
         help.add_item("About Paradox63", ABOUT).build();
-        (console, help)
+        (console, self.card_menu(), help)
     }
 }
 
@@ -202,6 +288,37 @@ impl Console {
 fn panel_reset(m: &mut Machine, reason: u32) {
     m.cpu.bus.reset_reason = reason as u8;
     m.reset();
+}
+
+/// Which card files were in the slots, kept beside the BIOS: one line per slot.
+fn cards_path(bios: &Path) -> PathBuf {
+    bios.with_extension("cards")
+}
+
+/// The cards from last time. The very first time, a new card goes in slot 1.
+fn load_cards(bios: &Path) -> [Option<PathBuf>; 2] {
+    match std::fs::read_to_string(cards_path(bios)) {
+        Ok(text) => {
+            let mut lines = text.lines().map(|l| (!l.is_empty()).then(|| PathBuf::from(l)));
+            [lines.next().flatten(), lines.next().flatten()]
+        }
+        Err(_) => [Some(bios.with_file_name("card1.p63m")), None],
+    }
+}
+
+fn save_cards(bios: &Path, cards: &[Option<PathBuf>; 2]) {
+    let line = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+    // losing the list isn't worth stopping for
+    let _ = std::fs::write(cards_path(bios), format!("{}\n{}\n", line(&cards[0]), line(&cards[1])));
+}
+
+fn card_dialog(cards: &[Option<PathBuf>; 2], bios: &Path) -> rfd::FileDialog {
+    let dir = cards.iter().flatten().find_map(|p| p.parent()).or_else(|| bios.parent());
+    let dialog = rfd::FileDialog::new().add_filter("Paradox63 memory card", &["p63m"]);
+    match dir {
+        Some(d) => dialog.set_directory(d),
+        None => dialog,
+    }
 }
 
 fn recent_path(bios: &Path) -> PathBuf {
@@ -224,11 +341,15 @@ fn message(title: &str, text: &str, level: rfd::MessageLevel) {
     rfd::MessageDialog::new().set_title(title).set_description(text).set_level(level).show();
 }
 
-pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Result<(), String> {
+pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool, cards: [Option<PathBuf>; 2]) -> Result<(), String> {
     let bios = find_bios(bios)?;
     let rom = load_bios(&bios)?;
     let recent = load_recent(&bios);
-    let mut console = Console { bios, rom, slot: None, machine: None, forced: None, recent };
+    let last = load_cards(&bios);
+    let mut console = Console { bios, rom, slot: None, machine: None, forced: None, recent, cards: [None, None], card_wait: [0; 2] };
+    for (slot, path) in cards.into_iter().zip(last).enumerate().filter_map(|(i, (given, last))| Some((i, given.or(last)?))) {
+        console.insert_card(slot, path)?;
+    }
     if let Some(path) = file {
         console.insert(Slot::read(path)?);
     }
@@ -247,18 +368,21 @@ pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Res
     let _timer = FineTimer::new();
     let mut clock = FrameClock::new();
     let mut timing = Stats::default();
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    let mut ports = Ports::new();
+    while window.is_open() {
         if rebuild {
             for h in handles.drain(..) {
                 window.remove_menu(h);
             }
-            let (c, help) = console.menus();
+            let (c, cards, help) = console.menus();
             handles.push(window.add_menu(&c));
+            handles.push(window.add_menu(&cards));
             handles.push(window.add_menu(&help));
             rebuild = false;
         }
         if let Some(id) = window.is_menu_pressed() {
             rebuild = true;
+            ports.free_mouse(&mut window);
             match id {
                 INSERT => {
                     let mut dialog = rfd::FileDialog::new().add_filter("Paradox63 cartridge", &["p63c"]);
@@ -279,15 +403,33 @@ pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Res
                     }
                 }
                 POWER => {
+                    console.flush_cards()?;
                     if console.machine.take().is_none() {
                         console.power_on()?;
                     }
                 }
                 QUIT => break,
+                id if id == CARD_INSERT || id == CARD_INSERT + 1 => {
+                    if let Some(path) = card_dialog(&console.cards, &console.bios).pick_file() {
+                        if let Err(e) = console.insert_card(id - CARD_INSERT, path) {
+                            message("Insert Memory Card", &e, rfd::MessageLevel::Error);
+                        }
+                    }
+                }
+                id if id == CARD_NEW || id == CARD_NEW + 1 => {
+                    let dialog = card_dialog(&console.cards, &console.bios).set_file_name("card.p63m");
+                    if let Some(path) = dialog.save_file() {
+                        let made = write_card(&path, &p63_cart::card::blank()).and_then(|()| console.insert_card(id - CARD_NEW, path));
+                        if let Err(e) = made {
+                            message("New Memory Card", &e, rfd::MessageLevel::Error);
+                        }
+                    }
+                }
+                id if id == CARD_EJECT || id == CARD_EJECT + 1 => console.eject_card(id - CARD_EJECT)?,
                 SPEED_AUTO => console.set_speed(None),
                 CONTROLS => message("Controls", CONTROLS_TEXT, rfd::MessageLevel::Info),
                 ABOUT => message("About Paradox63", &console.about(), rfd::MessageLevel::Info),
-                id if id >= RECENT && id < RECENT + RECENT_MAX => {
+                id if (RECENT..RECENT + RECENT_MAX).contains(&id) => {
                     if let Some(path) = console.recent.get(id - RECENT).cloned() {
                         match Slot::read(&path) {
                             Ok(slot) => console.insert(slot),
@@ -308,7 +450,8 @@ pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Res
         let t1 = Instant::now();
         let mut crashed = None;
         if let Some(m) = &mut console.machine {
-            m.cpu.bus.keyboard.pad[0] = PAD.iter().filter(|(k, _)| window.is_key_down(*k)).map(|(_, b)| b).fold(0, |a, b| a | b);
+            let bus = &mut m.cpu.bus;
+            ports.update(&mut window, &mut bus.keyboard, &mut bus.pointer);
             if let Err(e) = m.run_frame() {
                 crashed = Some(format!("The console stopped at frame {}, ${:06X}:\n{e}", m.frames, m.cpu.registers.pc()));
             }
@@ -321,15 +464,19 @@ pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Res
                 speaker.push(&m.audio);
             }
         }
+        console.settle_cards()?;
         if let Some(text) = crashed {
+            console.flush_cards()?;
             console.machine = None;
             rebuild = true;
+            ports.free_mouse(&mut window);
             message("Paradox63", &text, rfd::MessageLevel::Error);
         }
         let t2 = Instant::now();
         let picture = console.machine.as_ref().map_or(&black, |m| &m.frame);
         window.update_with_buffer(picture, w, h).map_err(|e| e.to_string())?;
-        let title = console.title();
+        let mouse = if ports.mouse_held() { "Ctrl+Alt frees the mouse" } else { "click to use the mouse" };
+        let title = format!("{} - {mouse}", console.title());
         if title != shown_title {
             window.set_title(&title);
             shown_title = title;
@@ -339,7 +486,7 @@ pub(super) fn play(file: Option<&Path>, bios: Option<&Path>, stats: bool) -> Res
             timing.frame(t1 - t0, t2 - t1, t2.elapsed(), queued);
         }
     }
-    Ok(())
+    console.flush_cards()
 }
 
 #[cfg(test)]
@@ -353,7 +500,7 @@ mod tests {
         let program = p63_asm::assemble_file("../games/pong.p63").ok()?;
         let data = super::super::make_cart(&program, Path::new("pong.p63")).ok()?;
         let slot = Slot { path: PathBuf::from("pong.p63c"), data, title: "PONG".into(), kind: "plain" };
-        let mut c = Console { bios, rom, slot: Some(slot), machine: None, forced: None, recent: Vec::new() };
+        let mut c = Console { bios, rom, slot: Some(slot), machine: None, forced: None, recent: Vec::new(), cards: [None, None], card_wait: [0; 2] };
         c.power_on().ok()?;
         let m = c.machine.as_mut()?;
         m.cpu.bus.nvram[..2].copy_from_slice(&[0x63, u8::from(boot_to_cart)]);
@@ -379,6 +526,82 @@ mod tests {
 
     fn cart_state(m: &mut Machine) -> u8 {
         m.cpu.bus.peek(p63_core::Addr::new(0x90))
+    }
+
+    /// The text on BG0's row `row`, as the screen shows it.
+    fn screen_row(m: &mut Machine, row: u32) -> String {
+        (0..40).map(|c| char::from(m.cpu.bus.peek(p63_core::Addr::new(p63_spec::VRAM_BG0 + (row * 40 + c) * 2)))).collect()
+    }
+
+    /// Holds `button` for one frame, then lets it go for `settle` frames.
+    fn press(m: &mut Machine, button: u32, settle: u32) {
+        m.cpu.bus.keyboard.pad[0] = button as u8;
+        m.run_frame().unwrap();
+        m.cpu.bus.keyboard.pad[0] = 0;
+        for _ in 0..settle {
+            m.run_frame().unwrap();
+        }
+    }
+
+    #[test]
+    fn home_lists_a_cards_saves_and_copies_one() {
+        let Some(mut c) = console(false) else { return };
+        let mut card = p63_cart::card::blank();
+        let mut save = vec![0u8; 300];
+        save[..12].copy_from_slice(b"PlayerName, day 3");
+        save[p63_spec::SH_ICON as usize..p63_spec::SH_PAL as usize].fill(0x12);
+        save[p63_spec::SH_PAL as usize + 1] = 0xE0;
+        save[p63_spec::SH_PAL as usize + 2] = 0xFC;
+        p63_cart::card::write_save(&mut card, "GAMETITLE", "SLOT1", &save).unwrap();
+        for n in 2..=9 {
+            save[..12].copy_from_slice(format!("Save {n}      ").as_bytes());
+            p63_cart::card::write_save(&mut card, "PONG", &format!("S{n}"), &save).unwrap();
+        }
+        let m = c.machine.as_mut().unwrap();
+        m.cpu.bus.cart.insert_card(0, card);
+        m.cpu.bus.cart.insert_card(1, p63_cart::card::blank());
+        frames_until(&mut c, 2000, home).expect("Home comes up");
+        let m = c.machine.as_mut().unwrap();
+        for _ in 0..60 {
+            m.run_frame().unwrap();
+        }
+        press(m, p63_spec::BTN_RIGHT, 40);
+        let shots = std::env::var("P63_SHOTS").ok();
+        if let Some(dir) = &shots {
+            super::super::save_bmp(&Path::new(dir).join("memory.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
+        }
+        assert!(screen_row(m, 7).contains("CARD 1") && screen_row(m, 7).contains("118 BLOCKS FREE"), "{}", screen_row(m, 7));
+        assert!(screen_row(m, 11).contains("PlayerName, DAY 3"), "{}", screen_row(m, 11));
+        assert!(screen_row(m, 12).contains("GAMETITLE") && screen_row(m, 12).contains("1 BLOCK"), "{}", screen_row(m, 12));
+        press(m, p63_spec::BTN_A, 5);
+        assert!(screen_row(m, 26).contains("A: COPY TO CARD 2"), "{}", screen_row(m, 26));
+        press(m, p63_spec::BTN_A, 5);
+        assert!(screen_row(m, 26).contains("COPIED TO CARD 2"), "{}", screen_row(m, 26));
+        let copy = p63_cart::card::saves(&m.cpu.bus.cart.cards[1].as_ref().unwrap().data).unwrap();
+        assert_eq!(copy.len(), 1);
+        assert_eq!((copy[0].game.as_str(), copy[0].name.as_str(), copy[0].title.as_str()), ("GAMETITLE", "SLOT1", "PlayerName, day 3"));
+        press(m, p63_spec::BTN_A, 5);
+        press(m, p63_spec::BTN_A, 5);
+        assert!(screen_row(m, 26).contains("IT IS ALREADY ON CARD 2"), "{}", screen_row(m, 26));
+        press(m, p63_spec::BTN_SELECT, 5);
+        assert!(screen_row(m, 11).contains("PlayerName, DAY 3"), "card 2 lists the copy: {}", screen_row(m, 11));
+        if let Some(dir) = &shots {
+            super::super::save_bmp(&Path::new(dir).join("memory2.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
+        }
+        m.cpu.bus.cart.eject_card(1);
+        for _ in 0..5 {
+            m.run_frame().unwrap();
+        }
+        assert!(screen_row(m, 12).contains("NO MEMORY CARD IN THIS SLOT"), "taking it out shows at once: {}", screen_row(m, 12));
+        press(m, p63_spec::BTN_SELECT, 5);
+        for _ in 0..8 {
+            press(m, p63_spec::BTN_DOWN, 3);
+        }
+        assert!(screen_row(m, 23).contains("SAVE 9"), "the list scrolls to the ninth: {}", screen_row(m, 23));
+        assert!(screen_row(m, 11).contains("SAVE 3"), "{}", screen_row(m, 11));
+        if let Some(dir) = &shots {
+            super::super::save_bmp(&Path::new(dir).join("memory3.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
+        }
     }
 
     #[test]
