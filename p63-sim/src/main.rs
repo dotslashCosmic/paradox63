@@ -4,11 +4,12 @@
 //! `call` assembles a file, calls one routine with the given registers and
 //!        prints the registers it returns with.
 //! `run`  boots a program or cartridge on the full machine for N frames.
-//! `play` opens the console in a window: the keyboard as the gamepad, sound, and the
+//! `play` opens the console in a window: the PC's keyboard, mouse and controllers, sound, and the
 //!        front panel (cartridge slot, power, reset, CPU speed) as menus.
 //! `test` runs test ROMs (built on games/tests/testlib.p63) and reports pass or fail.
 
 mod audio;
+mod input;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -44,14 +45,23 @@ enum Command {
         /// Encrypt the cartridge so only a P63 console can read it
         #[arg(long, requires = "cart")]
         encrypt: bool,
+        /// A library folder to look in for INCLUDE files (repeatable; P63_LIB adds more)
+        #[arg(short = 'I', long = "lib")]
+        lib: Vec<PathBuf>,
     },
     /// Open the console in a window, with this cartridge in the slot (or none).
-    /// Arrows = D-pad, Enter = Start, Backspace/C = Select, Z/X = A/B, Esc = quit
+    /// Keyboard, mouse (click in the window) and up to two controllers; Help > Controls lists the keys
     Play {
         file: Option<PathBuf>,
         /// Print a line a second: fps and where each frame's time went
         #[arg(long)]
         stats: bool,
+        /// A memory card file for slot 1, instead of the one the window had last time
+        #[arg(long)]
+        card1: Option<PathBuf>,
+        /// A memory card file for slot 2
+        #[arg(long)]
+        card2: Option<PathBuf>,
     },
     /// Boot a cartridge through the BIOS and run it headless (fresh settings: Home comes up)
     Run {
@@ -71,6 +81,12 @@ enum Command {
         /// Save the sound of the whole run as a .wav
         #[arg(long)]
         wav: Option<PathBuf>,
+        /// A memory card file for slot 1 (a new one is made if it doesn't exist); kept afterwards
+        #[arg(long)]
+        card1: Option<PathBuf>,
+        /// A memory card file for slot 2
+        #[arg(long)]
+        card2: Option<PathBuf>,
     },
     /// Call routines: `call utils/bitops.p63 POP_COUNT A=$A5`.
     /// Several in a row share state: `call utils/prng.p63 RAND_SEED8,RAND8 A=$42`
@@ -83,6 +99,9 @@ enum Command {
         /// Give up after this many instructions
         #[arg(long, default_value_t = 10_000_000)]
         max_steps: u64,
+        /// A library folder to look in for INCLUDE files (repeatable; P63_LIB adds more)
+        #[arg(short = 'I', long = "lib")]
+        lib: Vec<PathBuf>,
     },
     /// Run test ROM cartridges through the BIOS (Boot to Cartridge on) and report pass or fail
     Test {
@@ -97,14 +116,16 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let bios = cli.bios.as_deref();
     let result = match cli.command {
-        Command::Asm { file, output, symbols, cart, encrypt } => {
-            asm(&file, output.as_deref(), symbols, cart.as_deref(), encrypt)
+        Command::Asm { file, output, symbols, cart, encrypt, lib } => {
+            asm(&file, output.as_deref(), symbols, cart.as_deref(), encrypt, &libraries(lib))
         }
-        Command::Play { file, stats } => window::play(file.as_deref(), bios, stats),
-        Command::Run { file, frames, peek, hold, screenshot, wav } => {
-            run(&file, bios, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref())
+        Command::Play { file, stats, card1, card2 } => window::play(file.as_deref(), bios, stats, [card1, card2]),
+        Command::Run { file, frames, peek, hold, screenshot, wav, card1, card2 } => {
+            run(&file, bios, frames, &peek, &hold, screenshot.as_deref(), wav.as_deref(), [card1.as_deref(), card2.as_deref()])
         }
-        Command::Call { file, routine, regs, max_steps } => call(&file, &routine, &regs, max_steps),
+        Command::Call { file, routine, regs, max_steps, lib } => {
+            call(&file, &routine, &regs, max_steps, &libraries(lib))
+        }
         Command::Test { files, frames } => test(&files, bios, frames),
     };
     match result {
@@ -229,8 +250,23 @@ fn errors_to_string(errors: &[p63_asm::AsmError]) -> String {
     errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
 }
 
-fn asm(file: &Path, output: Option<&Path>, symbols: bool, cart: Option<&Path>, encrypt: bool) -> Result<(), String> {
-    let program = p63_asm::assemble_file(file).map_err(|e| errors_to_string(&e))?;
+/// The library folders for INCLUDE: those given with -I, then those in P63_LIB.
+fn libraries(mut given: Vec<PathBuf>) -> Vec<PathBuf> {
+    if let Some(env) = std::env::var_os("P63_LIB") {
+        given.extend(std::env::split_paths(&env));
+    }
+    given
+}
+
+fn asm(
+    file: &Path,
+    output: Option<&Path>,
+    symbols: bool,
+    cart: Option<&Path>,
+    encrypt: bool,
+    lib: &[PathBuf],
+) -> Result<(), String> {
+    let program = p63_asm::assemble_file_in(file, lib).map_err(|e| errors_to_string(&e))?;
     for (addr, bytes) in &program.segments {
         println!("${addr:06X}: {} bytes", bytes.len());
     }
@@ -475,6 +511,21 @@ fn nvram_path(bios: &Path) -> PathBuf {
     bios.with_extension("nvram")
 }
 
+/// A memory card file. One that doesn't exist yet is a new, formatted card.
+fn read_card(path: &Path) -> Result<Vec<u8>, String> {
+    match std::fs::read(path) {
+        Ok(data) if data.len() == p63_cart::card::SIZE => Ok(data),
+        Ok(_) => Err(format!("{}: not a memory card (a card file is exactly 1 MB)", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(p63_cart::card::blank()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+fn write_card(path: &Path, data: &[u8]) -> Result<(), String> {
+    std::fs::write(path, data).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run(
     file: &Path,
     bios: Option<&Path>,
@@ -483,9 +534,15 @@ fn run(
     hold: &[String],
     screenshot: Option<&Path>,
     wav: Option<&Path>,
+    cards: [Option<&Path>; 2],
 ) -> Result<(), String> {
     let (mut machine, info) = boot(file, bios)?;
     println!("booted {:?} ({} byte image)", info.title, info.image_len);
+    for (slot, path) in cards.iter().enumerate() {
+        if let Some(path) = path {
+            machine.cpu.bus.cart.insert_card(slot, read_card(path)?);
+        }
+    }
     for name in hold {
         machine.cpu.bus.keyboard.pad[0] |= button(name)?;
     }
@@ -500,6 +557,14 @@ fn run(
         }
     }
     println!("ran {frames} frames");
+    for (slot, path) in cards.iter().enumerate() {
+        if let (Some(path), Some(card)) = (path, &machine.cpu.bus.cart.cards[slot]) {
+            if card.dirty || !path.exists() {
+                write_card(path, &card.data)?;
+                println!("saved memory card {} to {}", slot + 1, path.display());
+            }
+        }
+    }
     if let Some(path) = wav {
         audio::save_wav(path, &sound)?;
         println!("saved {} ({} samples at {} Hz)", path.display(), sound.len(), p63_apu::SAMPLE_RATE);
@@ -574,7 +639,7 @@ fn set_register(cpu: &mut ReferenceInterpreter<Ram>, assignment: &str) -> Result
     Ok(())
 }
 
-fn call(file: &Path, routine: &str, regs: &[String], max_steps: u64) -> Result<(), String> {
+fn call(file: &Path, routine: &str, regs: &[String], max_steps: u64, lib: &[PathBuf]) -> Result<(), String> {
     let path = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let calls: String = routine
         .split(',')
@@ -586,7 +651,7 @@ fn call(file: &Path, routine: &str, regs: &[String], max_steps: u64) -> Result<(
         "    ORG $1000\nP63SIM_START:\n{calls}P63SIM_DONE: BRA P63SIM_DONE\n    INCLUDE \"{}\"\n",
         path.display()
     );
-    let program = p63_asm::assemble("call", &source).map_err(|e| errors_to_string(&e))?;
+    let program = p63_asm::assemble_in("call", &source, lib).map_err(|e| errors_to_string(&e))?;
     let start = program.symbol("P63SIM_START").unwrap_or(0x1000);
     let done = program.symbol("P63SIM_DONE").unwrap_or(0x1004);
 
