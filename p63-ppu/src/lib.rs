@@ -17,6 +17,13 @@ pub const STAT_OVERFLOW: u8 = 0x04;
 const TILE_BYTES: u32 = 32;
 /// Tiles per nametable row.
 const MAP_W: u32 = WIDTH as u32 / 8;
+/// What the renderer reads: OAM, then VRAM, from `OAM_BASE` to `VRAM_END`.
+pub const VIDEO_LEN: usize = (spec::VRAM_END - spec::OAM_BASE + 1) as usize;
+
+/// Where address `a` (OAM or VRAM) is in the video slice.
+fn at(a: u32) -> usize {
+    (a - spec::OAM_BASE) as usize
+}
 
 /// Register values the renderer needs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,16 +43,32 @@ pub struct Regs {
 
 /// RGB332 to 0x00RRGGBB, with the fade applied.
 #[must_use]
-pub fn rgb(c: u8, bright: u8) -> u32 {
-    let level = 31 - u32::from(bright.min(31));
-    let r = u32::from(c >> 5) * 255 / 7 * level / 31;
-    let g = u32::from((c >> 2) & 7) * 255 / 7 * level / 31;
-    let b = u32::from(c & 3) * 255 / 3 * level / 31;
+pub const fn rgb(c: u8, bright: u8) -> u32 {
+    let bright = if bright > 31 { 31 } else { bright };
+    let level = 31 - bright as u32;
+    let r = (c >> 5) as u32 * 255 / 7 * level / 31;
+    let g = ((c >> 2) & 7) as u32 * 255 / 7 * level / 31;
+    let b = (c & 3) as u32 * 255 / 3 * level / 31;
     (r << 16) | (g << 8) | b
 }
 
+/// `rgb` for every colour at every fade level, worked out once.
+static RGB: [[u32; 256]; 32] = {
+    let mut t = [[0; 256]; 32];
+    let mut f = 0;
+    while f < 32 {
+        let mut c = 0;
+        while c < 256 {
+            t[f][c] = rgb(c as u8, f as u8);
+            c += 1;
+        }
+        f += 1;
+    }
+    t
+};
+
 /// A decoded OAM entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Sprite {
     x: i32,
     y: i32,
@@ -92,8 +115,7 @@ fn sprite(oam: &[u8]) -> Option<Sprite> {
 /// Colour index (0-15) at (x, y) inside an 8x8 tile.
 /// In a 4bpp tile row the high nibble is the left pixel.
 fn tile_pixel(mem: &[u8], tile: u32, x: u32, y: u32) -> u8 {
-    let at = spec::VRAM_PATTERN + tile * TILE_BYTES + y * 4 + x / 2;
-    let byte = mem.get(at as usize).copied().unwrap_or(0);
+    let byte = mem.get(at(spec::VRAM_PATTERN + tile * TILE_BYTES + y * 4 + x / 2)).copied().unwrap_or(0);
     if x % 2 == 0 { byte >> 4 } else { byte & 0x0F }
 }
 
@@ -113,26 +135,43 @@ enum Bg {
     Bg2,
 }
 
-/// One BG pixel at screen (x, y): colour index, global palette and priority bit.
-fn bg_pixel(mem: &[u8], regs: &Regs, bg: Bg, x: u32, y: u32) -> (u8, u8, bool) {
+/// A BG pixel: colour index, global palette and priority bit.
+type BgPixel = (u8, u8, bool);
+
+/// One BG layer's pixels on screen line `y`, a tile row (8 pixels) at a time.
+fn bg_line(mem: &[u8], regs: &Regs, bg: Bg, y: u32, out: &mut [BgPixel; WIDTH]) {
     let (map, scroll_x, scroll_y) = match bg {
         Bg::Bg0 => (spec::VRAM_BG0, regs.scroll_x0, regs.scroll_y0),
         Bg::Bg1 => (spec::VRAM_BG1, regs.scroll_x1, regs.scroll_y1),
         Bg::Bg2 => (spec::VRAM_BG2, 0, 0),
     };
-    let x = (x + u32::from(scroll_x)) % WIDTH as u32;
     let y = (y + u32::from(scroll_y)) % HEIGHT as u32;
-    let entry = (map + ((y / 8) * MAP_W + x / 8) * 2) as usize;
-    let (index, attr) = (mem[entry], mem[entry + 1]);
-    let (palette, flip_v, flip_h, priority) = match bg {
-        Bg::Bg0 => ((regs.palgrp & 15) * 16 + ((attr >> 3) & 15), attr & 4 != 0, attr & 2 != 0, attr & 1 != 0),
-        Bg::Bg1 => ((regs.palgrp >> 4) * 16 + ((attr >> 2) & 15), attr & 2 != 0, attr & 1 != 0, false),
-        Bg::Bg2 => (0, false, false, false),
-    };
-    let tx = if flip_h { 7 - x % 8 } else { x % 8 };
-    let ty = if flip_v { 7 - y % 8 } else { y % 8 };
-    let tile = u32::from(regs.bank & 15) * 256 + u32::from(index);
-    (tile_pixel(mem, tile, tx, ty), palette, priority)
+    let first = u32::from(scroll_x) % WIDTH as u32;
+    let bank = u32::from(regs.bank & 15) * 256;
+    let mut x = 0;
+    while x < WIDTH {
+        let px = (first + x as u32) % WIDTH as u32;
+        let start = px % 8;
+        let n = ((8 - start) as usize).min(WIDTH - x);
+        let entry = at(map + ((y / 8) * MAP_W + px / 8) * 2);
+        let (index, attr) = (mem[entry], mem[entry + 1]);
+        let (palette, flip_v, flip_h, priority) = match bg {
+            Bg::Bg0 => ((regs.palgrp & 15) * 16 + ((attr >> 3) & 15), attr & 4 != 0, attr & 2 != 0, attr & 1 != 0),
+            Bg::Bg1 => ((regs.palgrp >> 4) * 16 + ((attr >> 2) & 15), attr & 2 != 0, attr & 1 != 0, false),
+            Bg::Bg2 => (0, false, false, false),
+        };
+        let ty = if flip_v { 7 - y % 8 } else { y % 8 };
+        let row = at(spec::VRAM_PATTERN + (bank + u32::from(index)) * TILE_BYTES + ty * 4);
+        let bytes: [u8; 4] = mem.get(row..row + 4).and_then(|b| b.try_into().ok()).unwrap_or([0; 4]);
+        for (k, slot) in out[x..x + n].iter_mut().enumerate() {
+            let col = start + k as u32;
+            let tx = if flip_h { 7 - col } else { col };
+            let byte = bytes[(tx / 2) as usize];
+            let c = if tx % 2 == 0 { byte >> 4 } else { byte & 0x0F };
+            *slot = (c, palette, priority);
+        }
+        x += n;
+    }
 }
 
 /// Draws one frame into `frame` (`WIDTH * HEIGHT` pixels of 0x00RRGGBB) with the
@@ -143,25 +182,45 @@ pub fn render(mem: &[u8], regs: Regs, frame: &mut [u32]) -> bool {
 }
 
 /// Draws one line of `frame` from VRAM, OAM and the registers as they are now.
-/// Returns true if the line had too many sprites.
+/// `mem` is the full 16 MB address space. Returns true if the line had too many sprites.
 pub fn render_line(mem: &[u8], regs: Regs, line: usize, frame: &mut [u32]) -> bool {
-    let palette = |p: u8, c: u8| mem[(spec::VRAM_PALETTE + u32::from(p) * 16 + u32::from(c)) as usize];
+    render_video_line(&mem[spec::OAM_BASE as usize..=spec::VRAM_END as usize], regs, line, frame, None)
+}
+
+/// Draws one line from `video` (`VIDEO_LEN` bytes laid out like OAM and VRAM, wherever
+/// they are). `inset` is a picture of finished 0x00RRGGBB pixels between BG1 and BG0:
+/// where it has a pixel, it covers BG2 and BG1, and BG0 and the sprites cover it.
+/// Returns true if the line had too many sprites.
+pub fn render_video_line(mem: &[u8], regs: Regs, line: usize, frame: &mut [u32], inset: Option<&[Option<u32>]>) -> bool {
+    let palette = |p: u8, c: u8| mem[at(spec::VRAM_PALETTE + u32::from(p) * 16 + u32::from(c))];
     let out = &mut frame[line * WIDTH..(line + 1) * WIDTH];
     if regs.ctrl & CTRL_ENABLE == 0 {
         out.fill(0);
         return false;
     }
     let line = line as i32;
-    let on_line: Vec<Sprite> = if regs.ctrl & CTRL_SPRITES == 0 {
-        Vec::new()
-    } else {
-        let oam = &mem[spec::OAM_BASE as usize..=spec::OAM_END as usize];
-        oam.chunks(spec::SPR_SIZE as usize)
-            .filter_map(sprite)
-            .filter(|s| (s.y..s.y + s.h as i32 * 8).contains(&line))
-            .collect()
-    };
-    let overflow = on_line.len() > SPRITES_PER_LINE;
+    // the sprites on this line, up to one past the limit (enough to see the overflow);
+    // anything that starts below the line or ends 32 pixels above it can't be on it
+    let mut on_line = [Sprite::default(); SPRITES_PER_LINE + 1];
+    let mut found = 0;
+    if regs.ctrl & CTRL_SPRITES != 0 {
+        let oam = &mem[at(spec::OAM_BASE)..=at(spec::OAM_END)];
+        for entry in oam.chunks(spec::SPR_SIZE as usize) {
+            let y = i32::from(entry[spec::SPR_Y as usize]);
+            if y > line || line - y >= 32 {
+                continue;
+            }
+            if let Some(s) = sprite(entry).filter(|s| (s.y..s.y + s.h as i32 * 8).contains(&line)) {
+                on_line[found] = s;
+                found += 1;
+                if found > SPRITES_PER_LINE {
+                    break;
+                }
+            }
+        }
+    }
+    let on_line = &on_line[..found];
+    let overflow = found > SPRITES_PER_LINE;
 
     // sprite line buffers as RGB332, split by priority
     let mut low = [None::<u8>; WIDTH];
@@ -183,34 +242,31 @@ pub fn render_line(mem: &[u8], regs: Regs, line: usize, frame: &mut [u32]) -> bo
     }
 
     let y = line as u32;
+    let (mut bg2, mut bg1, mut bg0s) = ([(0, 0, false); WIDTH], [(0, 0, false); WIDTH], [(0, 0, false); WIDTH]);
+    bg_line(mem, &regs, Bg::Bg2, y, &mut bg2);
+    if regs.ctrl & CTRL_BG1 != 0 {
+        bg_line(mem, &regs, Bg::Bg1, y, &mut bg1);
+    }
+    if regs.ctrl & CTRL_BG0 != 0 {
+        bg_line(mem, &regs, Bg::Bg0, y, &mut bg0s);
+    }
+    let fade = &RGB[usize::from(regs.bright.min(31))];
     for (x, px) in out.iter_mut().enumerate() {
-        let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg2, x as u32, y);
+        let (c, p, _) = bg2[x];
         let mut colour = palette(p, c);
-        if regs.ctrl & CTRL_BG1 != 0 {
-            let (c, p, _) = bg_pixel(mem, &regs, Bg::Bg1, x as u32, y);
-            if c != 0 {
-                colour = palette(p, c);
-            }
+        let (c, p, _) = bg1[x];
+        if c != 0 {
+            colour = palette(p, c);
         }
-        let bg0 = if regs.ctrl & CTRL_BG0 == 0 {
-            None
-        } else {
-            let (c, p, prio) = bg_pixel(mem, &regs, Bg::Bg0, x as u32, y);
-            (c != 0).then(|| (palette(p, c), prio))
-        };
-        if let Some((c, false)) = bg0 {
+        // the inset's pixel stands until something above it is drawn
+        let mut finished = inset.and_then(|i| i[x]);
+        let (c, p, prio) = bg0s[x];
+        let bg0 = (c != 0).then(|| (palette(p, c), prio));
+        for c in [bg0.filter(|b| !b.1).map(|b| b.0), low[x], bg0.filter(|b| b.1).map(|b| b.0), high[x]].into_iter().flatten() {
             colour = c;
+            finished = None;
         }
-        if let Some(c) = low[x] {
-            colour = c;
-        }
-        if let Some((c, true)) = bg0 {
-            colour = c;
-        }
-        if let Some(c) = high[x] {
-            colour = c;
-        }
-        *px = rgb(colour, regs.bright);
+        *px = finished.unwrap_or(fade[usize::from(colour)]);
     }
     overflow
 }
@@ -469,5 +525,27 @@ mod tests {
         assert_eq!(at(&frame, 8, 0), tile, "BG0 priority tile over a low-priority sprite");
         assert_eq!(at(&frame, 0, 8), sprite, "low-priority sprite over a normal BG0 tile");
         assert_eq!(at(&frame, 16, 0), sprite, "low-priority sprite over BG1");
+    }
+
+    #[test]
+    fn an_inset_sits_between_bg1_and_bg0() {
+        let mut mem = memory();
+        hide_all(&mut mem);
+        solid_tile(&mut mem, 1, 1);
+        set_colour(&mut mem, 0, 1, 0xE0);
+        put_tile(&mut mem, spec::VRAM_BG1, 0, 0, 1, 0);
+        put_tile(&mut mem, spec::VRAM_BG0, 1, 0, 1, 0);
+        put_sprite(&mut mem, 0, 16, 0, 1, 0, 0);
+        let inset = [Some(0x0012_3456); WIDTH];
+        let mut frame = vec![0; WIDTH * HEIGHT];
+        let video = &mem[spec::OAM_BASE as usize..=spec::VRAM_END as usize];
+        render_video_line(video, BGS, 0, &mut frame, Some(&inset));
+        assert_eq!(at(&frame, 0, 0), 0x0012_3456, "over BG1");
+        assert_eq!(at(&frame, 8, 0), rgb(0xE0, 0), "BG0 over it");
+        assert_eq!(at(&frame, 16, 0), rgb(0xE0, 0), "a sprite over it");
+        assert_eq!(at(&frame, 24, 0), 0x0012_3456, "over the backdrop");
+        let video_off = Regs { ctrl: 0, ..BGS };
+        render_video_line(video, video_off, 0, &mut frame, Some(&inset));
+        assert_eq!(at(&frame, 0, 0), 0, "display off is black");
     }
 }
