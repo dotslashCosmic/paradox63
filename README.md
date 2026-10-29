@@ -31,7 +31,7 @@ As of v0.6.0+, to play a cartridge, open CMD and type:
 The console boots to its Home BIOS screen; press Start/A to run the cartridge.
 This includes USB/Xbox controller support, and standard keyboard/mouse support.
 Hold `Select` during the startup logo to skip to the Home BIOS screen.
-With no file it opens with an empty slot, and you can insert one from the Console menu. Includes memory(todo), and system settings.
+With no file it opens with an empty slot, and you can insert one from the Console menu. Includes 2 memory card slots, 1mb each, and system settings.
 First cold boot will create a `.nvram` file, the console's battery backed memory, and a `card.p63m`, `bios.cards`, and `bios.recent` settings files.
 You can swap games at any time using shortcuts.
 
