@@ -6,7 +6,6 @@
 !/p63-spec/
 !/p63-core/
 !/p63-asm/
-!/p63-dis/
 !/p63-sim/
 !/p63-cart/
 !/p63-bus/
