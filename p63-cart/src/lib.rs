@@ -1,5 +1,6 @@
 //! p63-cart: `.p63` cartridge images: pack, verify, and load.
 
+pub mod card;
 pub mod crypt;
 
 use std::fmt;
@@ -81,7 +82,6 @@ pub struct Vectors {
 pub struct PackOptions {
     pub title: String,
     pub mapper: u8,
-    pub save_kb: u16,
     pub vectors: Vectors,
 }
 
@@ -130,7 +130,6 @@ pub fn pack(image: &[u8], opts: &PackOptions) -> Result<Vec<u8>, BootError> {
     put(&mut hdr, spec::CH_VER_MINOR, 1, u32::from(VERSION.1));
     put(&mut hdr, spec::CH_MAPPER, 1, u32::from(opts.mapper));
     put(&mut hdr, spec::CH_HDR_SIZE, 1, spec::CH_LEN);
-    put(&mut hdr, spec::CH_SAVE_KB, 2, u32::from(opts.save_kb));
     put(&mut hdr, spec::CH_IMAGE_LEN, 3, image.len() as u32);
     put(&mut hdr, spec::CH_ENTRY, 3, spec::FIXED_ENTRY);
     put(&mut hdr, spec::CH_CHECKSUM, 4, checksum(&image));
@@ -169,15 +168,13 @@ impl Cart {
             1 => {}
             _ => return Err(BootError::Minor),
         }
+        // saves go on memory cards, so there is no save RAM mapper any more
         let mapper = le(&data, spec::CH_MAPPER, 1);
-        let save = match mapper {
-            m if m == spec::MAPPER_ROM => false,
-            m if m == spec::MAPPER_ROM_SAVE => true,
-            _ => return Err(BootError::Mapper),
-        };
-        let save_kb = le(&data, spec::CH_SAVE_KB, 2);
+        if mapper != spec::MAPPER_ROM {
+            return Err(BootError::Mapper);
+        }
         let reserved_clear = data[spec::CH_RESERVED as usize..HEADER_LEN].iter().all(|&b| b == 0);
-        if le(&data, spec::CH_HDR_SIZE, 1) != spec::CH_LEN || !reserved_clear || save != (save_kb >= 1) {
+        if le(&data, spec::CH_HDR_SIZE, 1) != spec::CH_LEN || !reserved_clear || le(&data, spec::CH_SAVE_KB, 2) != 0 {
             return Err(BootError::Header);
         }
         if le(&data, spec::CH_ENTRY, 3) != spec::FIXED_ENTRY {
@@ -252,6 +249,8 @@ mod tests {
         assert_eq!(broken(0, b'X'), spec::ERR_MAGIC);
         assert_eq!(broken(spec::CH_VER_MAJOR as usize, 2), spec::ERR_MAJOR);
         assert_eq!(broken(spec::CH_MAPPER as usize, 9), spec::ERR_MAPPER);
+        assert_eq!(broken(spec::CH_MAPPER as usize, 1), spec::ERR_MAPPER, "the old save RAM mapper is gone");
+        assert_eq!(broken(spec::CH_SAVE_KB as usize, 1), spec::ERR_HEADER);
         assert_eq!(broken(spec::CH_ENTRY as usize + 1, 2), spec::ERR_ENTRY);
         assert_eq!(broken(HEADER_LEN + 3, 0), spec::ERR_CHECKSUM);
         assert_eq!(broken(spec::CH_IMAGE_LEN as usize, 9), spec::ERR_LENGTH);
