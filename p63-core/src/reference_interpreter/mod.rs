@@ -90,10 +90,63 @@ pub struct ReferenceInterpreter<B: Bus> {
 /// Interrupt nesting kept track of; deeper frames (a handler that never returns) drop the oldest.
 const MAX_FRAMES: usize = 64;
 
+/// Everything the CPU keeps between instructions, so one program can be set aside
+/// and another run (virtual mode), then the first picked up exactly where it was.
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // the interpreter's own flags, as they are
+pub struct CpuState {
+    pub registers: Registers,
+    nmi_pending: bool,
+    irq_pending: bool,
+    firq_pending: bool,
+    block_continuation: Option<BlockContinuation>,
+    halt: Halt,
+    nmi_active: bool,
+    frames: Vec<(Interrupt, Option<BlockContinuation>)>,
+}
+
+impl CpuState {
+    #[must_use]
+    pub fn halt(&self) -> Halt {
+        self.halt
+    }
+
+    /// What vblank does to a CPU in WAITV, for a program that isn't running just now.
+    pub fn signal_vblank(&mut self) {
+        if self.halt == Halt::VBlank {
+            self.halt = Halt::Running;
+        }
+    }
+}
+
+/// The CPU just before an instruction, for `rollback`.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // the interpreter's own flags, as they are
+pub struct Checkpoint {
+    registers: Registers,
+    nmi_pending: bool,
+    irq_pending: bool,
+    firq_pending: bool,
+    block_continuation: Option<BlockContinuation>,
+    halt: Halt,
+    nmi_active: bool,
+    depth: usize,
+    top: Option<(Interrupt, Option<BlockContinuation>)>,
+    all: Option<Vec<(Interrupt, Option<BlockContinuation>)>>,
+}
+
+impl Checkpoint {
+    #[must_use]
+    pub fn halt(&self) -> Halt {
+        self.halt
+    }
+}
+
 /// Why the CPU is halted, if it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Halt {
     /// Executing normally
+    #[default]
     Running,
     /// WAIT: woken by any pending interrupt
     Interrupt,
@@ -132,6 +185,74 @@ impl<B: Bus> ReferenceInterpreter<B> {
         self.halt = Halt::Running;
         self.nmi_active = false;
         self.frames.clear();
+    }
+
+    /// A copy of the CPU's whole state.
+    #[must_use]
+    pub fn save_state(&self) -> CpuState {
+        CpuState {
+            registers: self.registers.clone(),
+            nmi_pending: self.nmi_pending,
+            irq_pending: self.irq_pending,
+            firq_pending: self.firq_pending,
+            block_continuation: self.block_continuation.clone(),
+            halt: self.halt,
+            nmi_active: self.nmi_active,
+            frames: self.frames.clone(),
+        }
+    }
+
+    /// What `rollback` needs to undo the next instruction: the registers and flags, and of
+    /// the interrupt frames only how deep they were and the top one (an instruction pushes
+    /// or pops at most one). Much cheaper than `save_state` while handlers are running.
+    #[must_use]
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            registers: self.registers.clone(),
+            nmi_pending: self.nmi_pending,
+            irq_pending: self.irq_pending,
+            firq_pending: self.firq_pending,
+            block_continuation: self.block_continuation.clone(),
+            halt: self.halt,
+            nmi_active: self.nmi_active,
+            depth: self.frames.len(),
+            top: self.frames.last().cloned(),
+            // at the limit a push drops the oldest frame, so keep them all
+            all: (self.frames.len() >= MAX_FRAMES).then(|| self.frames.clone()),
+        }
+    }
+
+    /// Puts the CPU back as it was at `checkpoint`.
+    pub fn rollback(&mut self, c: Checkpoint) {
+        self.registers = c.registers;
+        self.nmi_pending = c.nmi_pending;
+        self.irq_pending = c.irq_pending;
+        self.firq_pending = c.firq_pending;
+        self.block_continuation = c.block_continuation;
+        self.halt = c.halt;
+        self.nmi_active = c.nmi_active;
+        if let Some(all) = c.all {
+            self.frames = all;
+            return;
+        }
+        self.frames.truncate(c.depth);
+        if self.frames.len() < c.depth {
+            self.frames.extend(c.top);
+        } else if let (Some(top), Some(last)) = (c.top, self.frames.last_mut()) {
+            *last = top;
+        }
+    }
+
+    /// Puts back a state from `save_state`.
+    pub fn load_state(&mut self, state: CpuState) {
+        self.registers = state.registers;
+        self.nmi_pending = state.nmi_pending;
+        self.irq_pending = state.irq_pending;
+        self.firq_pending = state.firq_pending;
+        self.block_continuation = state.block_continuation;
+        self.halt = state.halt;
+        self.nmi_active = state.nmi_active;
+        self.frames = state.frames;
     }
 
     /// Returns why the CPU is halted, if it is.
@@ -399,6 +520,33 @@ mod tests {
         // RESET -> boot ROM base (low-vector ROM bytes 1..3)
         assert_eq!(interp.registers.pc(), 0xFB_B600);
         assert!(!interp.irq_pending());
+    }
+
+    #[test]
+    fn rollback_undoes_taking_an_interrupt_and_its_rti() {
+        let mut ram = Ram::new(0x0100_0000);
+        // IRQ vector -> $000200: RTI; the program at $000100: NOPs
+        ram.write(crate::Addr::new(p63_spec::VEC_IRQ), 0x00);
+        ram.write(crate::Addr::new(p63_spec::VEC_IRQ + 1), 0x02);
+        ram.write(crate::Addr::new(0x200), 0x43);
+        let mut cpu = ReferenceInterpreter::new(ram);
+        cpu.registers.set_pc(0x100);
+        cpu.registers.set_sp(0x8000);
+        cpu.registers.set_cc(crate::Flags::empty());
+        cpu.set_irq_pending(true);
+        let before = cpu.checkpoint();
+        cpu.step().unwrap();
+        assert_eq!((cpu.registers.pc(), cpu.frames.len()), (0x200, 1), "the IRQ was taken");
+        cpu.rollback(before);
+        assert_eq!((cpu.registers.pc(), cpu.registers.sp(), cpu.frames.len()), (0x100, 0x8000, 0), "and undone");
+        cpu.step().unwrap();
+        cpu.set_irq_pending(false);
+        let inside = cpu.checkpoint();
+        cpu.step().unwrap();
+        assert_eq!((cpu.registers.pc(), cpu.frames.len()), (0x100, 0), "RTI");
+        cpu.rollback(inside);
+        assert_eq!((cpu.registers.pc(), cpu.frames.len()), (0x200, 1), "back inside the handler");
+        assert_eq!(cpu.frames[0].0, Interrupt::Irq);
     }
 
     #[test]
