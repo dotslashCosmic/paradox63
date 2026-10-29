@@ -82,60 +82,131 @@ impl Device for Video {
     }
 }
 
-/// Keyboard controller; only the gamepad byte is live so far.
-#[derive(Debug, Clone, Default)]
-pub struct Keyboard {
-    regs: [u8; 32],
-    /// Gamepad buttons, one bit each.
-    pub pad: [u8; 2],
+/// The cart registers one program has set: bank, control and save bank.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CartView {
+    pub bank: u8,
+    pub ctrl: u8,
+    pub sbank: u8,
 }
 
-impl Device for Keyboard {
-    fn read(&mut self, off: u32) -> u8 {
-        let pad = spec::KB_PAD - spec::KB_IO_BASE;
-        if (pad..pad + 2).contains(&off) {
-            self.pad[(off - pad) as usize]
-        } else {
-            self.regs[off as usize]
-        }
-    }
+const CTRL_CARD: u8 = spec::CARTC_CARD as u8;
+const CTRL_WREN: u8 = spec::CARTC_WREN as u8;
+const CTRL_SLOT2: u8 = spec::CARTC_SLOT2 as u8;
+const STAT_NEW: [u8; 2] = [spec::CARTS_NEW1 as u8, spec::CARTS_NEW2 as u8];
 
-    fn write(&mut self, off: u32, value: u8) {
-        self.regs[off as usize] = value;
-    }
+/// A memory card in one of the two card slots.
+#[derive(Debug, Clone)]
+pub struct MemoryCard {
+    /// Always `CARD_SIZE` bytes.
+    pub data: Vec<u8>,
+    /// Set when the card was written, so the frontend can keep it.
+    pub dirty: bool,
 }
 
-/// Cartridge registers plus the banked 64 KB window onto the cart data.
+/// Cartridge registers plus the banked 64 KB window onto the cart data, or onto a
+/// memory card.
 #[derive(Debug, Clone, Default)]
 pub struct CartPort {
     pub data: Vec<u8>,
+    pub cards: [Option<MemoryCard>; 2],
+    /// `CARTS_NEW1` and `CARTS_NEW2`: a card went in or out since the program cleared them.
+    changed: u8,
     bank: u8,
+    ctrl: u8,
+    sbank: u8,
 }
 
 impl CartPort {
-    /// Back to bank 0, as at power-on.
+    pub fn insert(&mut self, data: Vec<u8>) {
+        self.data = data;
+    }
+
+    /// Puts a card in slot 0 or 1. A short image is padded as erased flash.
+    pub fn insert_card(&mut self, slot: usize, mut data: Vec<u8>) {
+        data.resize(spec::CARD_SIZE as usize, 0xFF);
+        self.cards[slot] = Some(MemoryCard { data, dirty: false });
+        self.changed |= STAT_NEW[slot];
+    }
+
+    /// Takes the card out of slot 0 or 1, if there is one.
+    pub fn eject_card(&mut self, slot: usize) -> Option<MemoryCard> {
+        self.changed |= STAT_NEW[slot];
+        self.cards[slot].take()
+    }
+
+    #[must_use]
+    pub fn view(&self) -> CartView {
+        CartView { bank: self.bank, ctrl: self.ctrl, sbank: self.sbank }
+    }
+
+    pub fn set_view(&mut self, v: CartView) {
+        self.bank = v.bank;
+        self.ctrl = v.ctrl;
+        self.sbank = v.sbank;
+    }
+
+    /// Back to bank 0 with the window on ROM, as at power-on.
     pub fn reset(&mut self) {
         self.bank = 0;
+        self.ctrl = 0;
+        self.sbank = 0;
+    }
+
+    /// The card the window shows, as (slot, byte offset), while `CARTC_CARD` is set.
+    fn card_at(&self, off: u32) -> Option<(usize, usize)> {
+        if self.ctrl & CTRL_CARD == 0 {
+            return None;
+        }
+        let slot = usize::from(self.ctrl & CTRL_SLOT2 != 0);
+        Some((slot, usize::from(self.sbank) * spec::CART_BANK_SIZE as usize + off as usize))
     }
 
     pub fn window(&self, off: u32) -> u8 {
+        if let Some((slot, at)) = self.card_at(off) {
+            return self.cards[slot].as_ref().and_then(|c| c.data.get(at)).copied().unwrap_or(0xFF);
+        }
         let at = usize::from(self.bank) * spec::CART_BANK_SIZE as usize + off as usize;
         self.data.get(at).copied().unwrap_or(0xFF)
+    }
+
+    /// A write to the window reaches a card only while it is shown and WREN is set.
+    pub fn window_write(&mut self, off: u32, value: u8) {
+        if self.ctrl & CTRL_WREN == 0 {
+            return;
+        }
+        if let Some((slot, at)) = self.card_at(off) {
+            if let Some(card) = &mut self.cards[slot] {
+                if let Some(b) = card.data.get_mut(at) {
+                    *b = value;
+                    card.dirty = true;
+                }
+            }
+        }
     }
 }
 
 impl Device for CartPort {
     fn read(&mut self, off: u32) -> u8 {
         match off + spec::CART_STAT {
-            spec::CART_STAT => u8::from(!self.data.is_empty()),
+            spec::CART_STAT => {
+                let present = |slot: usize, bit: u32| if self.cards[slot].is_some() { bit as u8 } else { 0 };
+                u8::from(!self.data.is_empty()) | present(0, spec::CARTS_CARD1) | present(1, spec::CARTS_CARD2) | self.changed
+            }
             spec::CART_BANK => self.bank,
+            spec::CART_CTRL => self.ctrl,
+            spec::CART_SBANK => self.sbank,
             _ => 0,
         }
     }
 
     fn write(&mut self, off: u32, value: u8) {
-        if off + spec::CART_STAT == spec::CART_BANK {
-            self.bank = value;
+        match off + spec::CART_STAT {
+            spec::CART_STAT => self.changed &= !value,
+            spec::CART_BANK => self.bank = value,
+            spec::CART_CTRL => self.ctrl = value & (CTRL_CARD | CTRL_WREN | CTRL_SLOT2),
+            spec::CART_SBANK => self.sbank = value,
+            _ => {}
         }
     }
 }
