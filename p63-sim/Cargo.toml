@@ -19,3 +19,4 @@ clap.workspace = true
 anyhow.workspace = true
 rustyline.workspace = true
 rfd = "0.15"
+gilrs = "0.11"
