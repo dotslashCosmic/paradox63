@@ -229,7 +229,33 @@ CH_VEC_FIRQ     EQU 31     ; header offset, 2 byte(s)
 CH_TITLE        EQU 33     ; header offset, 16 byte(s)
 CH_RESERVED     EQU 49     ; header offset, 15 byte(s)
 MAPPER_ROM      EQU 0
-MAPPER_ROM_SAVE EQU 1
+CARTS_CART      EQU $01     ; CART_STAT: a cartridge is in the slot
+CARTS_CARD1     EQU $02     ; CART_STAT: a memory card is in slot 1
+CARTS_CARD2     EQU $04     ; CART_STAT: a memory card is in slot 2
+CARTS_NEW1      EQU $10     ; CART_STAT: slot 1's card went in or out since this was cleared (write 1 to clear)
+CARTS_NEW2      EQU $20     ; CART_STAT: slot 2's card went in or out since this was cleared (write 1 to clear)
+CARTC_CARD      EQU $01     ; CART_CTRL: the window shows a memory card
+CARTC_WREN      EQU $02     ; CART_CTRL: writes to the window reach the card
+CARTC_SLOT2     EQU $04     ; CART_CTRL: the card in slot 2 (else slot 1)
+CARD_SIZE       EQU $100000     ; bytes on a memory card: 16 banks of the window
+CARD_BLOCK      EQU $2000     ; card layout: the card is 128 blocks of 8 KB; block 0 is the directory
+CARD_BLOCKS     EQU $80     ; card layout: blocks on a card, the directory included
+CARD_VERSION    EQU $01     ; card layout: directory byte 4 (bytes 0-3 are ASCII `P63M`)
+CARD_ENTRIES    EQU $40     ; card layout: offset of the directory entries; entry n (32 bytes) describes block n+1
+CE_SIZE         EQU $20     ; card layout: bytes in a directory entry
+CE_STATE        EQU $00     ; card entry: CES_FREE, CES_FIRST or CES_MORE
+CE_NEXT         EQU $01     ; card entry: the save's next block, 0 at its last
+CE_COUNT        EQU $02     ; card entry: blocks in the save (first block only)
+CE_SEQ          EQU $03     ; card entry: counts up each time the save is rewritten; the newer of two copies wins (first block only)
+CE_GAME         EQU $04     ; card entry: the cartridge title that owns the save, 16 bytes, zero-padded (first block only)
+CE_NAME         EQU $14     ; card entry: the save's name within its game, 12 bytes, zero-padded (first block only)
+CES_FREE        EQU $00     ; card entry state: the block is free
+CES_FIRST       EQU $01     ; card entry state: the first block of a save; writing this byte last commits a save
+CES_MORE        EQU $02     ; card entry state: a later block of a save; free if no CES_FIRST chain reaches it
+SH_TITLE        EQU $00     ; save header (start of a save's first block): the title shown in the BIOS, 32 bytes, zero-padded
+SH_ICON         EQU $20     ; save header: a 16x16 icon, 4 tiles of 32 bytes (top left, top right, bottom left, bottom right)
+SH_PAL          EQU $A0     ; save header: the icon's 16 colours
+SH_DATA         EQU $100     ; save header: where the game's own data starts
 ERR_MAGIC       EQU 1     ; Cartridge magic is not P63C
 ERR_MAJOR       EQU 2     ; Unsupported major version
 ERR_MINOR       EQU 3     ; Unsupported minor version
@@ -260,6 +286,75 @@ SYS_SPEED       EQU $FFFED2     ; CPU clock, switched at the next vblank:
 SPEED_NORMAL    EQU 0          ; 7.16 MHz (power-on)
 SPEED_TURBO     EQU 1          ; 14.32 MHz
 SPEED_LOW       EQU 2          ; 3.58 MHz
+VM_SLOT         EQU $FFFE44
+VM_GO           EQU $FFFE45
+VM_WHY          EQU $FFFE46
+VM_CHORD        EQU $FFFE47
+VM_ARG          EQU $FFFE48     ; 4 bytes
+VM_TABLE        EQU $FFFE4C     ; 3 bytes
+VM_CARTBASE     EQU $FFFE4F
+VM_FRESH        EQU $80     ; VM_GO: start the guest from scratch (its saved CPU state is dropped)
+WHY_CHORD       EQU $01     ; VM_WHY: Select+Start and another button
+WHY_PAGE        EQU $05     ; VM_WHY: a page that isn't mapped; the instruction runs again on resume
+WHY_SYSTEM      EQU $04     ; VM_WHY: a write the guest isn't allowed (it didn't happen)
+WHY_ILLEGAL     EQU $06     ; VM_WHY: an illegal opcode
+WHY_RESET       EQU $07     ; VM_WHY: the RESET instruction or a write to SYS_RESET
+VMT_PAGES       EQU $00     ; VM table: 64 page entries: bit 7 there, bits 5-0 the real 256 KB page
+VMT_VECS        EQU $40     ; VM table: the guest's interrupt vectors, 32 bytes
+VMT_STATE       EQU $60     ; VM table: the guest's registers, 19 bytes
+VM_PAGE_SHIFT   EQU $12     ; guest pages are 256 KB
+VM_SHOW         EQU $FFFE51
+VM_WX           EQU $FFFE52     ; 2 bytes
+VM_WY           EQU $FFFE54
+VM_VRAM         EQU $FFFE55     ; 3 bytes
+VM_FLAGS        EQU $FFFE58
+VM_SLICE        EQU $FFFE59     ; 2 bytes
+WHY_SLICE       EQU $02     ; VM_WHY: its VM_SLICE lines ran out
+WHY_WAITV       EQU $03     ; VM_WHY: it ran WAITV with VMF_WAITV set; it waits for vblank when resumed
+SHOW_FULL       EQU $40     ; VM_SHOW: a guest fullscreen
+VM_DEPTH        EQU $FFFE5B
+VM_ARAM         EQU $FFFE5C     ; 3 bytes
+VM_VOL          EQU $FFFE5F
+VM_USED         EQU $FFFE60     ; 4 bytes
+VM_IDLE         EQU $FFFE64     ; 4 bytes
+VM_TICKS        EQU $FFFE68     ; 4 bytes
+VM_SPEED        EQU $FFFE6C
+VM_MARK         EQU $FFFE6D     ; 2 bytes
+VM_KB           EQU $FFFE6F     ; 2 bytes
+VM_VKB          EQU $FFFE71     ; 2 bytes
+PAD2            EQU $FFFFDE
+PORTS           EQU $FFFFDF
+MS_X            EQU $FFFEC0     ; 2 bytes
+MS_Y            EQU $FFFEC2     ; 2 bytes
+MS_BTN          EQU $FFFEC4
+MS_WHEEL        EQU $FFFEC5
+MSB_LEFT        EQU $01     ; MS_BTN: left button
+MSB_RIGHT       EQU $02     ; MS_BTN: right button
+MSB_MIDDLE      EQU $04     ; MS_BTN: middle button (or wheel press)
+PORT_PAD1       EQU $01     ; PORTS: a gamepad is plugged into port 1
+PORT_PAD2       EQU $02     ; PORTS: a gamepad is plugged into port 2
+PORT_KEYBOARD   EQU $04     ; PORTS: a keyboard is plugged in
+PORT_POINTER    EQU $08     ; PORTS: a pointer (mouse) is plugged in
+KBC_ON          EQU $01     ; KB_CTRL: the controller scans the keyboard (on at power-on)
+KBC_IRQ         EQU $02     ; KB_CTRL: /IRQ while a key is waiting (DR)
+KBC_MIRROR      EQU $04     ; KB_CTRL: the pad mirror: arrows, Z, X, Enter and Backspace also press gamepad 1's d-pad, A, B, Start and Select (on at power-on)
+KEY_HOME        EQU $C7     ; KB_DATA for keys with no character: $80 + the scan code
+KEY_UP          EQU $C8
+KEY_PGUP        EQU $C9
+KEY_LEFT        EQU $CB
+KEY_RIGHT       EQU $CD
+KEY_END         EQU $CF
+KEY_DOWN        EQU $D0
+KEY_PGDN        EQU $D1
+KEY_INS         EQU $D2
+KEY_F1          EQU $BB     ; F1-F12 are $BB-$C6
+VMF_WINDOW      EQU $04     ; VM_FLAGS: shown in its window on the host's screen
+VMF_SLEEP       EQU $08     ; VM_FLAGS: with VMF_WAITV, VM_GO lets a guest still waiting for vblank wait inside instead of returning at once, so it starts its frame the moment vblank comes
+VMF_HOLD        EQU $10     ; VM_FLAGS: keeps its turn through vblank unless another guest wakes then (for a fullscreen guest the host needn't interrupt)
+VMF_LIVE        EQU $20     ; VM_FLAGS: its video interrupts are taken on time even while it's stopped: the console runs the handler there and then, and when its RTI comes back, carries on with whoever had the CPU (the host sees nothing)
+VMF_WAITV       EQU $01     ; VM_FLAGS: stop at WAITV
+VMF_NOPAD       EQU $02     ; VM_FLAGS: the pad reads 0
+VM_VIDEO_LEN    EQU $20800     ; bytes in a video context: OAM and VRAM
 ENGINE_CHECK    EQU $01
 ENGINE_LOAD     EQU $02
 ENGINE_OK       EQU $01     ; status: done
