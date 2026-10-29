@@ -86,6 +86,12 @@ struct Line {
 
 /// Assembles a file on disk; INCLUDE paths are relative to the including file.
 pub fn assemble_file(path: impl AsRef<Path>) -> Result<Program, Vec<AsmError>> {
+    assemble_file_in(path, &[])
+}
+
+/// Assembles a file on disk. An INCLUDE is looked for next to the including file first,
+/// then in each library folder of `search`, in order.
+pub fn assemble_file_in(path: impl AsRef<Path>, search: &[PathBuf]) -> Result<Program, Vec<AsmError>> {
     let path = path.as_ref();
     let source = std::fs::read_to_string(path).map_err(|e| {
         vec![AsmError { file: path.display().to_string(), line: 0, message: e.to_string() }]
@@ -93,17 +99,33 @@ pub fn assemble_file(path: impl AsRef<Path>) -> Result<Program, Vec<AsmError>> {
     let mut errors = Vec::new();
     let mut lines = Vec::new();
     let mut scope = String::new();
-    read_lines(&path.display().to_string(), &source, path.parent(), 0, &mut scope, &mut lines, &mut errors);
+    let label = path.display().to_string();
+    read_lines(&label, &source, path.parent(), search, 0, &mut scope, &mut lines, &mut errors);
     finish(&lines, errors)
 }
 
 /// Assembles source text. INCLUDE is resolved relative to the current directory.
 pub fn assemble(name: &str, source: &str) -> Result<Program, Vec<AsmError>> {
+    assemble_in(name, source, &[])
+}
+
+/// Assembles source text, with library folders for INCLUDE as in [`assemble_file_in`].
+pub fn assemble_in(name: &str, source: &str, search: &[PathBuf]) -> Result<Program, Vec<AsmError>> {
     let mut errors = Vec::new();
     let mut lines = Vec::new();
     let mut scope = String::new();
-    read_lines(name, source, None, 0, &mut scope, &mut lines, &mut errors);
+    read_lines(name, source, None, search, 0, &mut scope, &mut lines, &mut errors);
     finish(&lines, errors)
+}
+
+/// Where an INCLUDE's file is: next to the including file if it's there, else in the first
+/// library folder that has it (else the local path, so the error names it).
+fn resolve(name: &str, dir: Option<&Path>, search: &[PathBuf]) -> PathBuf {
+    let local = dir.map_or_else(|| PathBuf::from(name), |d| d.join(name));
+    if local.exists() {
+        return local;
+    }
+    search.iter().map(|lib| lib.join(name)).find(|p| p.exists()).unwrap_or(local)
 }
 
 fn finish(lines: &[Line], errors: Vec<AsmError>) -> Result<Program, Vec<AsmError>> {
@@ -119,6 +141,7 @@ fn read_lines(
     file: &str,
     source: &str,
     dir: Option<&Path>,
+    search: &[PathBuf],
     depth: usize,
     scope: &mut String,
     out: &mut Vec<Line>,
@@ -136,11 +159,11 @@ fn read_lines(
                         errors.push(err("INCLUDE nested too deeply".into()));
                         continue;
                     }
-                    let path: PathBuf = dir.map_or_else(|| PathBuf::from(name), |d| d.join(name));
+                    let path = resolve(name, dir, search);
                     match std::fs::read_to_string(&path) {
                         Ok(text) => {
                             let label = path.display().to_string();
-                            read_lines(&label, &text, path.parent(), depth + 1, scope, out, errors);
+                            read_lines(&label, &text, path.parent(), search, depth + 1, scope, out, errors);
                         }
                         Err(e) => errors.push(err(format!("can't read `{}`: {e}", path.display()))),
                     }
@@ -184,6 +207,15 @@ fn run_passes(lines: &[Line]) -> Result<Program, Vec<AsmError>> {
     Ok(Program { segments: layout.segments.into_iter().filter(|(_, b)| !b.is_empty()).collect(), symbols })
 }
 
+/// What one line comes to in a pass.
+enum Step<'a> {
+    Nothing,
+    Fail(String),
+    Define(&'a str, i64),
+    Org(i64),
+    Bytes(Vec<u8>),
+}
+
 /// One pass over the program. `known` holds values from the previous pass.
 fn lay_out(lines: &[Line], hints: &mut [Hint], known: &HashMap<String, i64>, final_pass: bool) -> Layout {
     let mut symbols = known.clone();
@@ -203,60 +235,64 @@ fn lay_out(lines: &[Line], hints: &mut [Hint], known: &HashMap<String, i64>, fin
                 fail(m);
             }
         }
-        let env_symbols = symbols.clone();
-        let env = Env { symbols: &env_symbols, here: pc };
-        let eval = |e: &Expr| -> Result<i64, String> {
-            match e.eval(&env) {
-                Ok(v) => Ok(v),
-                Err(EvalError::Undefined(s)) => Err(format!("undefined symbol `{s}`")),
-                Err(EvalError::Other(m)) => Err(m),
+        // the line is worked out against the symbols as they stand, then any new
+        // symbol is recorded (borrowing, not copying the table: it can be large)
+        let step = {
+            let env = Env { symbols: &symbols, here: pc };
+            let eval = |e: &Expr| -> Result<i64, String> {
+                match e.eval(&env) {
+                    Ok(v) => Ok(v),
+                    Err(EvalError::Undefined(s)) => Err(format!("undefined symbol `{s}`")),
+                    Err(EvalError::Other(m)) => Err(m),
+                }
+            };
+            match &line.stmt.kind {
+                Kind::Empty | Kind::Include(_) => Step::Nothing,
+                Kind::Equ(name, e) => match eval(e) {
+                    Ok(v) => Step::Define(name, v),
+                    Err(m) => Step::Fail(m),
+                },
+                Kind::Directive(name, args) if name == ".ORG" => {
+                    match args.first().map(|a| expr::parse_expr(a, &line.stmt.scope)).transpose() {
+                        Ok(Some(e)) => match eval(&e) {
+                            Ok(v) => Step::Org(v),
+                            Err(m) => Step::Fail(m),
+                        },
+                        Ok(None) => Step::Fail("ORG needs an address".into()),
+                        Err(m) => Step::Fail(m),
+                    }
+                }
+                Kind::Directive(name, args) => match data(name, args, &line.stmt.scope, &eval, final_pass) {
+                    Ok(b) => Step::Bytes(b),
+                    Err(m) => Step::Fail(m),
+                },
+                Kind::Instr(mn, ops) => {
+                    let ctx = Ctx { env: Env { symbols: &symbols, here: pc }, final_pass };
+                    match encode(mn, ops, &ctx, hint) {
+                        Ok(b) => Step::Bytes(b),
+                        Err(m) => Step::Fail(m),
+                    }
+                }
             }
         };
-
-        let bytes: Vec<u8> = match &line.stmt.kind {
-            Kind::Empty | Kind::Include(_) => continue,
-            Kind::Equ(name, e) => {
-                match eval(e) {
-                    Ok(v) => {
-                        if let Some(m) = define(&mut symbols, &mut defined, line, name, v) {
-                            fail(m);
-                        }
-                    }
-                    Err(m) => fail(m),
-                }
+        let bytes = match step {
+            Step::Nothing => continue,
+            Step::Fail(m) => {
+                fail(m);
                 continue;
             }
-            Kind::Directive(name, args) if name == ".ORG" => {
-                match args.first().map(|a| expr::parse_expr(a, &line.stmt.scope)).transpose() {
-                    Ok(Some(e)) => match eval(&e) {
-                        Ok(v) => {
-                            pc = v;
-                            segments.push(((v & 0xFF_FFFF) as u32, Vec::new()));
-                        }
-                        Err(m) => fail(m),
-                    },
-                    Ok(None) => fail("ORG needs an address".into()),
-                    Err(m) => fail(m),
-                }
-                continue;
-            }
-            Kind::Directive(name, args) => match data(name, args, &line.stmt.scope, &eval, final_pass) {
-                Ok(b) => b,
-                Err(m) => {
+            Step::Define(name, v) => {
+                if let Some(m) = define(&mut symbols, &mut defined, line, name, v) {
                     fail(m);
-                    continue;
                 }
-            },
-            Kind::Instr(mn, ops) => {
-                let ctx = Ctx { env: Env { symbols: &env_symbols, here: pc }, final_pass };
-                match encode(mn, ops, &ctx, hint) {
-                    Ok(b) => b,
-                    Err(m) => {
-                        fail(m);
-                        continue;
-                    }
-                }
+                continue;
             }
+            Step::Org(v) => {
+                pc = v;
+                segments.push(((v & 0xFF_FFFF) as u32, Vec::new()));
+                continue;
+            }
+            Step::Bytes(b) => b,
         };
         pc += bytes.len() as i64;
         segments.last_mut().expect("always a segment").1.extend(bytes);
