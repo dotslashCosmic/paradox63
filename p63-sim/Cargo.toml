@@ -7,7 +7,6 @@ edition.workspace = true
 [dependencies]
 p63-core = { path = "../p63-core" }
 p63-asm = { path = "../p63-asm" }
-p63-dis = { path = "../p63-dis" }
 p63-spec = { path = "../p63-spec" }
 p63-cart = { path = "../p63-cart" }
 p63-bus = { path = "../p63-bus" }
