@@ -1,6 +1,7 @@
 /*
 !/.gitignore
 !/LICENSE
+!/BIOS_LICENSE
 !/Cargo.toml
 !/Cargo.lock
 !/p63-spec/
