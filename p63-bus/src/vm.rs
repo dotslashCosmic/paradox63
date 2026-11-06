@@ -114,7 +114,7 @@ impl Slot {
     }
 
     /// Reads its page table into `pages`.
-    pub fn load_pages(&mut self, ram: &[u8]) {
+    pub fn load_pages(&mut self, ram: &crate::ram::Ram) {
         self.pages = (0..64)
             .map(|p| page(ram, self.table, p << spec::VM_PAGE_SHIFT).map_or(NO_PAGE, |at| at as u32))
             .collect();
@@ -282,8 +282,8 @@ impl Vm {
 
 /// Where guest address `a` (a RAM address) really is, if its page is mapped.
 #[must_use]
-pub fn page(ram: &[u8], table: u32, a: u32) -> Option<usize> {
-    let entry = ram[((table + (a >> spec::VM_PAGE_SHIFT)) & 0xFF_FFFF) as usize];
+pub fn page(ram: &crate::ram::Ram, table: u32, a: u32) -> Option<usize> {
+    let entry = ram.get(((table + (a >> spec::VM_PAGE_SHIFT)) & 0xFF_FFFF) as usize);
     let real = entry & 0x3F;
     (entry & PAGE_THERE != 0 && real < RAM_PAGES).then(|| ((u32::from(real) << spec::VM_PAGE_SHIFT) | (a & PAGE_MASK)) as usize)
 }
