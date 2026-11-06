@@ -3,6 +3,7 @@
 pub mod bios;
 pub mod devices;
 pub mod input;
+pub mod ram;
 pub mod vm;
 
 use devices::{CartPort, CartView, Device, Video};
@@ -14,7 +15,7 @@ use p63_spec as spec;
 
 /// Every address, routed to RAM, ROM or a device.
 pub struct SystemBus {
-    ram: Vec<u8>,
+    ram: ram::Ram,
     /// Boot ROM image at `BOOT_ROM`; empty when the high-level boot is used.
     pub boot_rom: bios::BootRom,
     /// Battery-backed settings RAM at `NVRAM_BASE`, kept by the boot ROM.
@@ -48,7 +49,7 @@ pub struct SystemBus {
 impl Default for SystemBus {
     fn default() -> Self {
         Self {
-            ram: vec![0; 0x0100_0000],
+            ram: ram::Ram::default(),
             boot_rom: bios::BootRom::default(),
             nvram: [0; NVRAM_LEN],
             nvram_dirty: false,
@@ -72,12 +73,6 @@ impl Default for SystemBus {
 }
 
 impl SystemBus {
-    /// The whole address space as the video chip sees it (VRAM, OAM, palette).
-    #[must_use]
-    pub fn memory(&self) -> &[u8] {
-        &self.ram
-    }
-
     /// A read for tools (peeks, debuggers): as the host CPU would see it, except that the
     /// boot ROM always reads $FF, locked or not, and a peek doesn't clear `VM_CHORD`.
     pub fn peek(&mut self, addr: Addr) -> u8 {
@@ -102,7 +97,7 @@ impl SystemBus {
     /// Undoes the RAM writes of a guest instruction that stopped on a missing page.
     fn undo_guest_writes(&mut self) {
         for (at, old) in self.vm.undo.drain(..).rev() {
-            self.ram[at] = old;
+            self.ram.set(at, old);
         }
     }
 
@@ -111,14 +106,14 @@ impl SystemBus {
         if (4..=spec::MAIN_TOP).contains(&a) {
             // the common case first: its RAM, through its page cache
             if let Some(at) = s.ram_at(a) {
-                return self.ram[at];
+                return self.ram.get(at);
             }
             self.vm.stop_with(vm::WHY_PAGE, a);
             return 0;
         }
         let (table, cartbase, flags, context) = (s.table, s.cartbase, s.flags, s.vram != 0);
         if let Some(at) = s.video_at(a).or_else(|| s.aram_at(a)) {
-            return self.ram[at];
+            return self.ram.get(at);
         }
         if s.aram != 0 && within(a, spec::AUDIO_IO_BASE, spec::AUDIO_IO_END) {
             return self.vm.slots[slot].apu.read(a - spec::AUDIO_IO_BASE);
@@ -143,7 +138,7 @@ impl SystemBus {
         if a < 4 {
             spec::LOW_VECTOR_ROM[a as usize]
         } else if a >= vm::VECTORS {
-            self.ram[vm::vector(table, a)]
+            self.ram.get(vm::vector(table, a))
 
         } else if a == spec::CART_BANK {
             self.cart.read(a - spec::CART_STAT).wrapping_sub(cartbase)
@@ -160,8 +155,8 @@ impl SystemBus {
         let s = &self.vm.slots[slot];
         if (4..=spec::MAIN_TOP).contains(&a) {
             if let Some(at) = s.ram_at(a) {
-                self.vm.undo.push((at, self.ram[at]));
-                self.ram[at] = value;
+                self.vm.undo.push((at, self.ram.get(at)));
+                self.ram.set(at, value);
                 self.vm.slots[slot].touch(a);
             } else {
                 self.vm.stop_with(vm::WHY_PAGE, a);
@@ -170,14 +165,14 @@ impl SystemBus {
         }
         let (table, cartbase, context) = (s.table, s.cartbase, s.vram != 0);
         if let Some(at) = s.video_at(a) {
-            self.vm.undo.push((at, self.ram[at]));
-            self.ram[at] = value;
+            self.vm.undo.push((at, self.ram.get(at)));
+            self.ram.set(at, value);
             self.vm.slots[slot].touch_video(a);
             return;
         }
         if let Some(at) = s.aram_at(a) {
-            self.vm.undo.push((at, self.ram[at]));
-            self.ram[at] = value;
+            self.vm.undo.push((at, self.ram.get(at)));
+            self.ram.set(at, value);
             return;
         }
         if within(a, spec::KB_IO_BASE, spec::KB_IO_END) {
@@ -199,8 +194,8 @@ impl SystemBus {
         if a < 4 {
         } else if a >= vm::VECTORS {
             let at = vm::vector(table, a);
-            self.vm.undo.push((at, self.ram[at]));
-            self.ram[at] = value;
+            self.vm.undo.push((at, self.ram.get(at)));
+            self.ram.set(at, value);
         } else if a == SYS_RESET {
             self.vm.stop_with(vm::WHY_RESET, u32::from(value));
         } else if a == SYS_SPEED {
@@ -271,6 +266,7 @@ impl SystemBus {
             a if within(a, spec::VM_ARAM, spec::VM_ARAM + 2) => {
                 let shift = 8 * (a - spec::VM_ARAM);
                 s.aram = (s.aram & !(0xFF << shift)) | u32::from(value) << shift;
+                self.keep_contexts_plain();
             }
             spec::VM_VOL => s.vol = value,
             spec::VM_MARK => s.mark_lo = value,
@@ -278,6 +274,7 @@ impl SystemBus {
             a if within(a, spec::VM_VRAM, spec::VM_VRAM + 2) => {
                 let shift = 8 * (a - spec::VM_VRAM);
                 s.vram = (s.vram & !(0xFF << shift)) | u32::from(value) << shift;
+                self.keep_contexts_plain();
             }
             spec::VM_FLAGS => s.flags = value,
             a if within(a, spec::VM_SLICE, spec::VM_SLICE + 1) => {
@@ -286,6 +283,16 @@ impl SystemBus {
             }
             _ => {}
         }
+    }
+
+    /// The guests' video and sound contexts, which the video chip and the audio read whole,
+    /// are kept plain in RAM.
+    pub fn keep_contexts_plain(&mut self) {
+        let ranges = self.vm.slots.iter().flat_map(|s| {
+            let video = (s.vram != 0).then(|| s.vram as usize..s.vram as usize + p63_ppu::VIDEO_LEN);
+            video.into_iter().chain(s.aram_range())
+        });
+        self.ram.keep_plain(ranges.collect());
     }
 
     /// The video registers the running program sees: a guest's own, or the real ones.
@@ -340,7 +347,7 @@ impl SystemBus {
                 return None;
             }
             let image = crypt::image(data, layout, &e.key);
-            self.ram[e.dst as usize..end].copy_from_slice(&image);
+            self.ram.write(e.dst as usize, &image);
             self.stall += layout.image_len as u32 * ENGINE_CYCLES_PER_BYTE;
         }
         Some(ENGINE_OK | if layout.sealed { ENGINE_SEALED } else { 0 })
@@ -349,11 +356,12 @@ impl SystemBus {
     /// Runs the audio engines for one output tick: the real one over Audio RAM, and each
     /// guest's own over its Audio RAM, at its volume, all mixed.
     pub fn audio_tick(&mut self) -> (i16, i16) {
-        let (l, r) = self.audio.tick(&self.ram[spec::ARAM_BASE as usize..=spec::ARAM_END as usize]);
+        let aram = self.ram.slice(spec::ARAM_BASE as usize..spec::ARAM_END as usize + 1).expect("Audio RAM");
+        let (l, r) = self.audio.tick(aram);
         let (mut l, mut r) = (i32::from(l), i32::from(r));
         for s in &mut self.vm.slots {
-            let Some(range) = s.aram_range() else { continue };
-            let (gl, gr) = s.apu.tick(&self.ram[range]);
+            let Some(aram) = s.aram_range().and_then(|r| self.ram.slice(r)) else { continue };
+            let (gl, gr) = s.apu.tick(aram);
             l += i32::from(gl) * i32::from(s.vol) / 255;
             r += i32::from(gr) * i32::from(s.vol) / 255;
         }
@@ -434,7 +442,7 @@ impl SystemBus {
         if a < 4 {
             spec::LOW_VECTOR_ROM[a as usize]
         } else if a <= spec::MAIN_TOP {
-            self.ram[a as usize]
+            self.ram.get(a as usize)
         } else if within(a, spec::BOOT_ROM, spec::CART_WIN - 1) {
             // without a boot ROM image the high-level boot does its job
             if self.boot_locked {
@@ -475,7 +483,7 @@ impl SystemBus {
             0xFF
         } else {
             // audio RAM, OAM, VRAM and the high vectors are plain RAM
-            self.ram[a as usize]
+            self.ram.get(a as usize)
         }
     }
 
@@ -513,7 +521,7 @@ impl SystemBus {
         } else if a < 4 || within(a, spec::BOOT_ROM, spec::CART_WIN - 1) || within(a, spec::VRAM_END + 1, spec::CART_STAT - 1) {
             // ROM and reserved I/O ignore writes
         } else if a <= spec::MAIN_TOP {
-            self.ram[a as usize] = value;
+            self.ram.set(a as usize, value);
         } else if within(a, spec::VIDEO_IO_BASE, spec::VIDEO_IO_END) {
             self.video.write(a - spec::VIDEO_IO_BASE, value);
         } else if within(a, spec::KB_IO_BASE, spec::KB_IO_END) {
@@ -523,7 +531,7 @@ impl SystemBus {
         } else if within(a, spec::CART_STAT, spec::AUDIO_IO_BASE - 1) {
             self.cart.write(a - spec::CART_STAT, value);
         } else {
-            self.ram[a as usize] = value;
+            self.ram.set(a as usize, value);
         }
     }
 }
@@ -588,12 +596,12 @@ impl Machine {
 
     /// Boots through a boot ROM image: the cartridge goes in as it is and the CPU
     /// starts from RESET, so the boot ROM does the checking and loading.
-    pub fn boot_with_rom(&mut self, boot_rom: Vec<u8>, cart_file: Vec<u8>) -> Result<(), String> {
+    pub fn boot_with_rom(&mut self, boot_rom: bios::BootRom, cart_file: Vec<u8>) -> Result<(), String> {
         let size = (spec::CART_WIN - spec::BOOT_ROM) as usize;
         if boot_rom.len() > size {
             return Err(format!("boot ROM is {} bytes; the slot holds {size}", boot_rom.len()));
         }
-        self.cpu.bus.boot_rom = bios::BootRom::new(boot_rom);
+        self.cpu.bus.boot_rom = boot_rom;
         self.cpu.bus.cart.insert(cart_file);
         self.cpu.reset();
         Ok(())
@@ -767,7 +775,7 @@ impl Machine {
         let fresh = fresh || saved.is_none();
         let at = (s.table + spec::VMT_STATE) as usize;
         let mut state = if fresh { p63_core::CpuState::default() } else { saved.unwrap_or_default() };
-        state.registers = vm::registers_from(&bus.ram[at..at + vm::STATE_LEN]);
+        state.registers = vm::registers_from(&bus.ram.read(at..at + vm::STATE_LEN));
         if fresh {
             s.cart = CartView { bank: s.cartbase, ctrl: 0, sbank: 0 };
             s.video = Video::default();
@@ -815,7 +823,7 @@ impl Machine {
         let state = self.cpu.save_state();
         let bus = &mut self.cpu.bus;
         let at = (bus.vm.slots[slot].table + spec::VMT_STATE) as usize;
-        bus.ram[at..at + vm::STATE_LEN].copy_from_slice(&vm::state_bytes(&state.registers));
+        bus.ram.write(at, &vm::state_bytes(&state.registers));
         let s = &mut bus.vm.slots[slot];
         s.cpu = Some(state);
         s.cart = bus.cart.view();
@@ -978,7 +986,7 @@ impl Machine {
     fn render_host(&mut self, line: usize, inset: Option<&[Option<u32>]>) {
         let bus = &mut self.cpu.bus;
         let regs = ppu_regs(&bus.video);
-        let video = &bus.ram[spec::OAM_BASE as usize..=spec::VRAM_END as usize];
+        let video = bus.ram.slice(spec::OAM_BASE as usize..spec::VRAM_END as usize + 1).expect("video RAM");
         if p63_ppu::render_video_line(video, regs, line, &mut self.frame, inset) {
             bus.video.stat |= p63_ppu::STAT_OVERFLOW;
         }
@@ -991,7 +999,7 @@ impl Machine {
         let s = &mut bus.vm.slots[slot];
         let regs = ppu_regs(&s.video);
         let base = s.vram as usize;
-        let Some(video) = bus.ram.get(base..base + p63_ppu::VIDEO_LEN) else { return };
+        let Some(video) = bus.ram.slice(base..base + p63_ppu::VIDEO_LEN) else { return };
         let out = if windowed { &mut self.guest_next[slot] } else { &mut self.frame };
         if p63_ppu::render_video_line(video, regs, line, out, None) {
             s.video.stat |= p63_ppu::STAT_OVERFLOW;
@@ -1115,7 +1123,7 @@ mod tests {
         let program = p63_asm::assemble_file_in("tests/card_lib.p63", &[games]).unwrap();
         let mut m = Machine::new();
         for (i, b) in program.image_at(0x100).unwrap().into_iter().enumerate() {
-            m.cpu.bus.ram[0x100 + i] = b;
+            m.cpu.bus.ram.set(0x100 + i, b);
         }
         m.cpu.bus.cart.insert(p63_cart::pack(&[1, 2], &p63_cart::PackOptions::default()).unwrap());
         m.cpu.bus.cart.insert_card(0, p63_cart::card::blank());
@@ -1128,7 +1136,7 @@ mod tests {
         }
         // opened, saved, 124 free, found at block 3, loaded, page 0 changed, page 39 kept,
         // 125 free after the delete, gone, and the cart's ROM back in the window
-        assert_eq!(&m.cpu.bus.ram[0x10..0x1A], &[1, 1, 124, 3, 1, 0x77, 39, 125, 0, b'P']);
+        assert_eq!(m.cpu.bus.ram.read(0x10..0x1A), &[1, 1, 124, 3, 1, 0x77, 39, 125, 0, b'P']);
         let card = &m.cpu.bus.cart.cards[0].as_ref().unwrap().data;
         let saves = p63_cart::card::saves(card).unwrap();
         assert_eq!(saves.len(), 1, "what the console wrote, read back by the reference reader");
@@ -1156,16 +1164,16 @@ RESULT   EQU $003000
         let load = |m: &mut Machine, src: &str, at: u32| {
             let p = p63_asm::assemble("t", &format!("{VM_EQUS}\n    ORG $000100\n{src}")).unwrap();
             for (i, b) in p.image_at(0x100).unwrap().into_iter().enumerate() {
-                m.cpu.bus.ram[at as usize + i] = b;
+                m.cpu.bus.ram.set(at as usize + i, b);
             }
         };
         load(&mut m, host, 0x100);
         load(&mut m, guest, 0x04_0100);
-        m.cpu.bus.ram[0x2000] = 0x81;
-        let state = &mut m.cpu.bus.ram[0x2000 + spec::VMT_STATE as usize..];
-        state[0] = 0x50;
-        state[16] = 0x00;
-        state[17] = 0x01;
+        m.cpu.bus.ram.set(0x2000, 0x81);
+        let state = 0x2000 + spec::VMT_STATE as usize;
+        m.cpu.bus.ram.set(state, 0x50);
+        m.cpu.bus.ram.set(state + 16, 0x00);
+        m.cpu.bus.ram.set(state + 17, 0x01);
         let r = &mut m.cpu.registers;
         r.set_pc(0x100);
         r.set_sp(0x8000);
@@ -1174,7 +1182,7 @@ RESULT   EQU $003000
     }
 
     fn host_result(m: &mut Machine, n: usize) -> Vec<u8> {
-        m.cpu.bus.ram[0x3000..0x3000 + n].to_vec()
+        m.cpu.bus.ram.read(0x3000..0x3000 + n)
     }
 
     const RUN_GUEST: &str = "
@@ -1215,18 +1223,18 @@ DONE:
     ST A,$080000
     ST A,$FFFED1";
         let mut m = vm_machine(&host, guest);
-        m.cpu.bus.ram[0x2001] = 0x82;
+        m.cpu.bus.ram.set(0x2001, 0x82);
         m.run_frame().unwrap();
         let r = host_result(&mut m, 11);
-        assert_eq!(m.cpu.bus.ram[0x04_1000], 0x5A, "guest RAM is on its page");
+        assert_eq!(m.cpu.bus.ram.get(0x04_1000), 0x5A, "guest RAM is on its page");
         assert_eq!(&r[..5], &[vm::WHY_PAGE, 0x00, 0x00, 0x08, 0x00], "the ST D stopped at $080000");
         assert_eq!(r[10], 0, "and its first byte was undone");
         assert_eq!(&r[5..10], &[vm::WHY_RESET, 0x12, 0, 0, 0], "ran again, then wrote A to SYS_RESET");
-        assert_eq!(m.cpu.bus.ram[0x0B_FFFF], 0x34, "page 1 is real page 2");
-        assert_eq!(m.cpu.bus.ram[0x0C_0000], 0x12, "page 2 is real page 3");
+        assert_eq!(m.cpu.bus.ram.get(0x0B_FFFF), 0x34, "page 1 is real page 2");
+        assert_eq!(m.cpu.bus.ram.get(0x0C_0000), 0x12, "page 2 is real page 3");
         assert!(!m.cpu.bus.reset_requested, "the console didn't reset");
         let at = 0x2000 + spec::VMT_STATE as usize;
-        assert_eq!(&m.cpu.bus.ram[at + 3..at + 5], &[0x34, 0x12], "the guest's registers are in its table (D)");
+        assert_eq!(m.cpu.bus.ram.read(at + 3..at + 5), &[0x34, 0x12], "the guest's registers are in its table (D)");
     }
 
     #[test]
@@ -1240,7 +1248,7 @@ SPIN:
         let mut m = vm_machine(&host, guest);
         m.cpu.bus.keyboard.pad[0] = 0x30;
         m.run_frame().unwrap();
-        assert_eq!(m.cpu.bus.ram[0x04_2000], 0x30, "Select+Start alone reach the game");
+        assert_eq!(m.cpu.bus.ram.get(0x04_2000), 0x30, "Select+Start alone reach the game");
         assert_eq!(m.cpu.bus.vm.guest, Some(0));
         m.cpu.bus.keyboard.pad[0] = 0x38;
         m.run_frame().unwrap();
@@ -1267,7 +1275,7 @@ SPIN:
 
         let mut m = vm_machine(&host, "    LD A,$FFFE44\n    ST A,$001000\n    RESET\n");
         m.run_frame().unwrap();
-        assert_eq!(m.cpu.bus.ram[0x04_1000], 0xFF, "the VM registers read $FF");
+        assert_eq!(m.cpu.bus.ram.get(0x04_1000), 0xFF, "the VM registers read $FF");
         assert_eq!(host_result(&mut m, 1)[0], vm::WHY_RESET);
         assert_eq!(m.cpu.registers.pc() & 0xFF_0000, 0, "the host is still running");
     }
@@ -1309,8 +1317,8 @@ DONE:
         let mut m = vm_machine(&run_with_context(vm::VMF_WAITV, 0), guest);
         m.run_frame().unwrap();
         assert_eq!(host_result(&mut m, 1)[0], vm::WHY_WAITV, "stopped at its WAITV");
-        assert_eq!(m.cpu.bus.ram[spec::VRAM_PALETTE as usize], 0, "the real palette is untouched");
-        assert_eq!(m.cpu.bus.ram[(CONTEXT + spec::VRAM_PALETTE - spec::OAM_BASE) as usize], 0xE0);
+        assert_eq!(m.cpu.bus.ram.get(spec::VRAM_PALETTE as usize), 0, "the real palette is untouched");
+        assert_eq!(m.cpu.bus.ram.get((CONTEXT + spec::VRAM_PALETTE - spec::OAM_BASE) as usize), 0xE0);
         assert_eq!(m.cpu.bus.vm.slots[0].video.register(spec::V_CTRL), 1, "its own registers");
         assert_eq!(m.cpu.bus.video.register(spec::V_CTRL), 0);
         let red = p63_ppu::rgb(0xE0, 0);
@@ -1387,11 +1395,12 @@ DONE:
         let mut bus = SystemBus::default();
         let s = &mut bus.vm.slots[1];
         (s.aram, s.vol) = (0x20_0000, 255);
+        bus.keep_contexts_plain();
         bus.vm.guest = Some(1);
         bus.write(Addr::new(spec::ARAM_BASE), 0x40);
         bus.write(Addr::new(spec::AUD_MVOL_L), 0x7F);
-        assert_eq!(bus.ram[0x20_0000], 0x40, "its Audio RAM is in host RAM");
-        assert_eq!(bus.ram[spec::ARAM_BASE as usize], 0, "the real one is untouched");
+        assert_eq!(bus.ram.get(0x20_0000), 0x40, "its Audio RAM is in host RAM");
+        assert_eq!(bus.ram.get(spec::ARAM_BASE as usize), 0, "the real one is untouched");
         assert_eq!(bus.vm.slots[1].apu.read(spec::AUD_MVOL_L - spec::AUDIO_IO_BASE), 0x7F);
         assert_eq!(bus.audio.read(spec::AUD_MVOL_L - spec::AUDIO_IO_BASE), 0, "and its own registers");
         bus.vm.guest = None;
@@ -1484,7 +1493,7 @@ HANDLER:
             m.run_frame().unwrap();
         }
         assert_eq!(host_result(&mut m, 1)[0], vm::WHY_SLICE, "its turn ran out and the host kept the CPU");
-        m.cpu.bus.ram[0x04_1000]
+        m.cpu.bus.ram.get(0x04_1000)
     }
 
     const RUN_GUEST_SETUP: &str = "
@@ -1505,14 +1514,14 @@ HANDLER:
     fn a_live_guest_takes_its_interrupts_while_another_guest_runs() {
         let mut m = vm_machine(&format!("{RUN_GUEST}\nDONE:\n    BRA DONE"), "LOOP:\n    BRA LOOP");
         // slot 1: stopped, live, a vblank handler that counts at its $001000 (real $0C1000)
-        m.cpu.bus.ram[0x2100] = 0x83;
+        m.cpu.bus.ram.set(0x2100, 0x83);
         let handler = p63_asm::assemble(
             "t",
             "    ORG $000100\n    LD A,#$01\n    ST A,$FFFF90\n    LD A,$001000\n    INC A\n    ST A,$001000\n    RTI",
         )
         .unwrap();
         for (i, b) in handler.image_at(0x100).unwrap().into_iter().enumerate() {
-            m.cpu.bus.ram[0x0C_0100 + i] = b;
+            m.cpu.bus.ram.set(0x0C_0100 + i, b);
         }
         let s = &mut m.cpu.bus.vm.slots[1];
         s.table = 0x2100;
@@ -1525,15 +1534,16 @@ HANDLER:
         cpu.registers = regs.clone();
         s.cpu = Some(cpu);
         let at = (0x2100 + spec::VMT_STATE) as usize;
-        m.cpu.bus.ram[at..at + vm::STATE_LEN].copy_from_slice(&vm::state_bytes(&regs));
+        m.cpu.bus.ram.write(at, &vm::state_bytes(&regs));
         let s = &mut m.cpu.bus.vm.slots[1];
         s.video.write(spec::V_IRQEN - spec::VIDEO_IO_BASE, 1);
-        m.cpu.bus.ram[(0x2100 + spec::VMT_VECS + (spec::VEC_IRQ - vm::VECTORS)) as usize..][..3].copy_from_slice(&[0x00, 0x01, 0x00]);
+        m.cpu.bus.ram.write((0x2100 + spec::VMT_VECS + (spec::VEC_IRQ - vm::VECTORS)) as usize, &[0x00, 0x01, 0x00]);
+        m.cpu.bus.keep_contexts_plain();
         for _ in 0..6 {
             m.run_frame().unwrap();
         }
         assert_eq!(m.cpu.bus.vm.guest, Some(0), "slot 0 still has the CPU");
-        assert!(m.cpu.bus.ram[0x0C_1000] >= 5, "slot 1 took each vblank, got {}", m.cpu.bus.ram[0x0C_1000]);
+        assert!(m.cpu.bus.ram.get(0x0C_1000) >= 5, "slot 1 took each vblank, got {}", m.cpu.bus.ram.get(0x0C_1000));
     }
 
     #[test]
@@ -1555,7 +1565,7 @@ DONE:
         let mut m = vm_machine(&host, guest);
         m.cpu.bus.keyboard.keys[usize::from(input::scan::Z)] = true;
         m.run_frame().unwrap();
-        assert_eq!(m.cpu.bus.ram[0x04_1000], spec::BTN_A as u8, "a new program has the mirror on: Z is A");
+        assert_eq!(m.cpu.bus.ram.get(0x04_1000), spec::BTN_A as u8, "a new program has the mirror on: Z is A");
         assert_eq!(host_result(&mut m, 9)[8], 0, "the host turned its own off");
     }
 
@@ -1609,7 +1619,7 @@ DONE:
         bus.write_u24_le(Addr::new(ENGINE_DST), 0x2000);
         bus.write(Addr::new(ENGINE_CTRL), 2);
         assert_eq!(read(&mut bus, ENGINE_CTRL), ENGINE_OK);
-        assert_eq!(&bus.memory()[0x2000..0x2004], &[1, 2, 3, 4]);
+        assert_eq!(bus.ram.read(0x2000..0x2004), [1, 2, 3, 4]);
         assert!(bus.stall > 0, "the copy takes bus time");
         bus.write(Addr::new(SYS_LOCK), 0);
         bus.write(Addr::new(ENGINE_CTRL), 2);
