@@ -2,39 +2,102 @@ PARADOX63 BIOS PROPRIETARY LICENSE
 
 Copyright (c) 2026 dotslashCosmic. All rights reserved.
 
-This license covers the Paradox63 BIOS: the file bios.bin and the boot ROM
-program inside it (the "BIOS"). It does not cover the Paradox63 emulator, which
-is licensed separately under the GNU General Public License, version 3.
+This license governs the Paradox63 BIOS, meaning the boot ROM program and
+its data, in any form and under any file name, including the file bios.bin
+(a "P63B" image) and any decrypted, extracted or dumped copy of it (the
+"BIOS"). The BIOS includes all firmware code, data, keys, routines and
+messages incorporated into it, including those relating to cartridge
+detection, validation, initialization and execution, and the key used to
+encrypt the BIOS image, wherever it is stored, including within official
+builds of the Paradox63 emulator.
 
-1. You may
-   - use the BIOS, free of charge, with the Paradox63 emulator or with
-     Paradox63-compatible hardware;
-   - copy and share the official, unmodified bios.bin, free of charge, as long
-     as this license goes with it.
+This license does not govern the source code of the Paradox63 emulator,
+which is licensed separately under the GNU General Public License, version
+3. Official builds of the emulator also contain the BIOS key; the BIOS key
+is not part of the emulator's source code and is governed by this license,
+not the GPL. This license also does not govern independently developed
+games, applications or other cartridge software, which remain the property
+of their respective authors.
 
-2. You may not
-   - modify the BIOS, or share a modified copy;
-   - decompile, disassemble or reverse engineer the BIOS, or extract its
-     program, keys or data, except where the law allows it regardless of this
-     license;
-   - sell the BIOS, or include it in anything you sell, without written
-     permission;
-   - remove or change this license or any copyright notice.
+1. Permitted Uses
+   Subject to the terms of this license, you may:
+
+   (a) use the BIOS, free of charge, with any Paradox63 emulator or with
+       Paradox63-compatible hardware;
+
+   (b) copy and distribute the official, unmodified bios.bin, free of
+       charge, provided that a copy of this license accompanies it; and
+
+   (c) create, modify, use, publish, distribute and sell your own
+       Paradox63-compatible games and software, including homebrew software
+       and independent cartridge releases, without obtaining permission
+       under this license.
+
+2. Restrictions
+   You may not:
+   (a) modify the BIOS, or distribute a modified copy of it;
+
+   (b) decompile, disassemble or reverse engineer the BIOS, or extract its
+       program, keys or data, except to the extent that applicable law
+       expressly permits such activity notwithstanding this restriction;
+
+   (c) sell the BIOS, or include it in any product or service that is sold,
+       without the prior written permission of dotslashCosmic;
+
+   (d) remove or alter this license or any copyright or trademark notice;
+       or
+
+   (e) represent any game, cartridge or other product as an official,
+       authorized, certified or endorsed Paradox63 release without the
+       prior written permission of dotslashCosmic.
 
 3. Ownership
-   The BIOS is licensed, not sold. All rights not granted here are reserved.
+   The BIOS is licensed, not sold. All rights not expressly granted in this
+   license are reserved by dotslashCosmic.
 
-4. Cartridges
-   Programs you write for the Paradox63 are yours. Running them on the BIOS
-   does not make them subject to this license.
+4. Games and Cartridges
+   Games, applications and other programs developed for Paradox63 remain
+   the property of their respective authors, and running them on the BIOS
+   does not make them subject to this license. Official Paradox63 releases,
+   including officially authorized games and cartridges, are designated at
+   the sole discretion of dotslashCosmic. Compatibility with Paradox63,
+   successful execution on the BIOS, or inclusion in an emulator does not
+   constitute official authorization. The permissions granted to
+   independent developers under section 1 do not include permission to
+   reproduce, modify, distribute or commercially include the BIOS, and any
+   such use remains subject to the terms of this license.
 
-5. No warranty
+5. Disclaimer of Warranty and Limitation of Liability
    THE BIOS IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR
-   OTHER LIABILITY ARISING FROM THE USE OF THE BIOS.
+   IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY ARISING FROM THE USE OF THE BIOS.
 
-6. Ending
-   This license ends automatically if you break its terms. You must then stop
-   using the BIOS and delete your copies.
+6. Trademarks
+   Paradox63™, P63™ and their associated logos (the "Marks") are trademarks
+   of dotslashCosmic. Only dotslashCosmic may use the Marks to name, brand
+   or promote a product. Except as expressly stated in this section, no
+   right or license to the Marks is granted, whether by implication,
+   estoppel or otherwise. The "OFFICIAL P63 CARTRIDGE" notice displayed by
+   the BIOS is reserved for cartridges sealed by dotslashCosmic.
+
+   You may refer to the Marks solely as necessary to identify the Paradox63
+   platform, including in source code, file names and extensions, technical
+   documentation, and factual statements of compatibility, provided that:
+
+   (a) a product name may include a Mark only as a descriptive reference to
+       the platform the product is for, accompanied by a distinct name of
+       its own, and a Mark may not be the product's name or the main part
+       of it;
+
+   (b) no reference may use the logos; and
+
+   (c) no reference may state or suggest that the product is official, or
+       that it is made, sponsored, endorsed by or affiliated with
+       dotslashCosmic.
+
+7. Termination
+   This license terminates automatically if you fail to comply with any of
+   its terms. Upon termination, you must cease all use of the BIOS and keys, and
+   destroy all copies of them in your possession.
 
 SPDX-License-Identifier: LicenseRef-Paradox63-BIOS-Proprietary
