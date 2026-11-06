@@ -22,10 +22,10 @@ The Paradox63 aims to define, explore and tool an 8-bit architecture from the gr
 
 ## Usage
 
-The release zip has `p63-sim.exe`, the signed `bios.bin`, example `.p63c` carts, and example
+The release zip has `p63-sim.exe`, the signed `bios.bin` and `bios.key`, example `.p63c` carts, and example
 source programs in `games/` and `utils/`. Keep `bios.bin` next to the exe.
 
-As of v0.6.0+, to play a cartridge, open CMD and type:
+As of v0.6.1+, to play a cartridge, open CMD and type:
     `p63-sim.exe play`
 
 The console boots to its Home BIOS screen; press Start/A to run the cartridge.
@@ -67,7 +67,7 @@ Every command takes `--bios PATH` if the BIOS lives somewhere else. Run
 
 ## Building
 
-You need Rust (stable) from https://rustup.rs.
+You need Rust(1.89+) (stable) from https://rustup.rs.
 
     cargo build --release
     cargo test --workspace
