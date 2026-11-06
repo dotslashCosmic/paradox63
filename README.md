@@ -73,3 +73,5 @@ You need Rust(1.89+) (stable) from https://rustup.rs.
     cargo test --workspace
 
 The exe lands in `target/release/`. Put `bios.bin` from a release next to it.
+
+Paradox63™ and P63™ are trademarks of dotslashCosmic. See BIOS_LICENSE.
