@@ -75,7 +75,7 @@ impl Slot {
 /// The console: its BIOS, the slot, and the machine while the power is on.
 struct Console {
     bios: PathBuf,
-    rom: Vec<u8>,
+    rom: p63_bus::bios::BootRom,
     slot: Option<Slot>,
     machine: Option<Machine>,
     /// The speed switch: `None` lets the program pick.
@@ -218,7 +218,7 @@ impl Console {
         };
         let bios = self.bios.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         format!(
-            "Paradox63 simulator {}\nHardware spec {}\n\nBIOS: {bios} (signature verified)\nCartridge: {cart}\n\
+            "Paradox63\u{2122} simulator {}\nHardware spec {}\n\nBIOS: {bios} (signature verified)\nCartridge: {cart}\n\
              Memory card 1: {}\nMemory card 2: {}\nCPU: {speed}\n\n\
              The simulator is free software under the GNU GPL v3.\nThe BIOS is proprietary; see BIOS_LICENSE.",
             env!("CARGO_PKG_VERSION"),
@@ -548,7 +548,7 @@ mod tests {
         let Some(mut c) = console(false) else { return };
         let mut card = p63_cart::card::blank();
         let mut save = vec![0u8; 300];
-        save[..12].copy_from_slice(b"PlayerName, day 3");
+        save[..17].copy_from_slice(b"PlayerName, day 3");
         save[p63_spec::SH_ICON as usize..p63_spec::SH_PAL as usize].fill(0x12);
         save[p63_spec::SH_PAL as usize + 1] = 0xE0;
         save[p63_spec::SH_PAL as usize + 2] = 0xFC;
@@ -571,10 +571,10 @@ mod tests {
             super::super::save_bmp(&Path::new(dir).join("memory.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
         }
         assert!(screen_row(m, 7).contains("CARD 1") && screen_row(m, 7).contains("118 BLOCKS FREE"), "{}", screen_row(m, 7));
-        assert!(screen_row(m, 11).contains("PlayerName, DAY 3"), "{}", screen_row(m, 11));
+        assert!(screen_row(m, 11).contains("PLAYERNAME, DAY 3"), "{}", screen_row(m, 11));
         assert!(screen_row(m, 12).contains("GAMETITLE") && screen_row(m, 12).contains("1 BLOCK"), "{}", screen_row(m, 12));
         press(m, p63_spec::BTN_A, 5);
-        assert!(screen_row(m, 26).contains("A: COPY TO CARD 2"), "{}", screen_row(m, 26));
+        assert!(screen_row(m, 26).contains("A: COPY TO 2  START: DELETE"), "{}", screen_row(m, 26));
         press(m, p63_spec::BTN_A, 5);
         assert!(screen_row(m, 26).contains("COPIED TO CARD 2"), "{}", screen_row(m, 26));
         let copy = p63_cart::card::saves(&m.cpu.bus.cart.cards[1].as_ref().unwrap().data).unwrap();
@@ -584,7 +584,14 @@ mod tests {
         press(m, p63_spec::BTN_A, 5);
         assert!(screen_row(m, 26).contains("IT IS ALREADY ON CARD 2"), "{}", screen_row(m, 26));
         press(m, p63_spec::BTN_SELECT, 5);
-        assert!(screen_row(m, 11).contains("PlayerName, DAY 3"), "card 2 lists the copy: {}", screen_row(m, 11));
+        assert!(screen_row(m, 11).contains("PLAYERNAME, DAY 3"), "card 2 lists the copy: {}", screen_row(m, 11));
+        press(m, p63_spec::BTN_A, 5);
+        press(m, p63_spec::BTN_START, 5);
+        assert!(screen_row(m, 26).contains("START AGAIN TO DELETE IT"), "{}", screen_row(m, 26));
+        press(m, p63_spec::BTN_START, 5);
+        assert!(screen_row(m, 26).contains("SAVE DELETED"), "{}", screen_row(m, 26));
+        assert!(p63_cart::card::saves(&m.cpu.bus.cart.cards[1].as_ref().unwrap().data).unwrap().is_empty(), "the copy is gone");
+        assert!(screen_row(m, 12).contains("NO SAVES ON THIS CARD"), "{}", screen_row(m, 12));
         if let Some(dir) = &shots {
             super::super::save_bmp(&Path::new(dir).join("memory2.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
         }
@@ -602,6 +609,48 @@ mod tests {
         if let Some(dir) = &shots {
             super::super::save_bmp(&Path::new(dir).join("memory3.bmp"), &m.frame, p63_ppu::WIDTH, p63_ppu::HEIGHT).unwrap();
         }
+    }
+
+    #[test]
+    fn controller_test_keeps_the_buttons_to_itself() {
+        let Some(mut c) = console(false) else { return };
+        frames_until(&mut c, 2000, home).expect("Home comes up");
+        let m = c.machine.as_mut().unwrap();
+        for _ in 0..60 {
+            m.run_frame().unwrap();
+        }
+        press(m, p63_spec::BTN_RIGHT, 40);
+        press(m, p63_spec::BTN_RIGHT, 40);
+        assert!(screen_row(m, 14).contains("A: TEST"), "{}", screen_row(m, 14));
+        // the attribute of a button's first letter on the controller row (B at 6, UP at 18)
+        let lit = |m: &mut Machine, col: u32| m.cpu.bus.peek(p63_core::Addr::new(p63_spec::VRAM_BG0 + (16 * 40 + col) * 2 + 1));
+        let dim = lit(m, 6);
+        m.cpu.bus.keyboard.pad[0] = p63_spec::BTN_B as u8;
+        for _ in 0..5 {
+            m.run_frame().unwrap();
+        }
+        assert_eq!(lit(m, 6), dim, "nothing lights while not testing");
+        m.cpu.bus.keyboard.pad[0] = 0;
+        m.run_frame().unwrap();
+        press(m, p63_spec::BTN_A, 40);
+        m.cpu.bus.keyboard.pad[0] = p63_spec::BTN_UP as u8;
+        for _ in 0..3 {
+            m.run_frame().unwrap();
+        }
+        assert_ne!(lit(m, 18), dim, "UP lights while testing");
+        m.cpu.bus.keyboard.pad[0] = 0;
+        m.run_frame().unwrap();
+        assert!(screen_row(m, 14).contains("START+SELECT: DONE"), "{}", screen_row(m, 14));
+        for b in [p63_spec::BTN_LEFT, p63_spec::BTN_RIGHT, p63_spec::BTN_A, p63_spec::BTN_START, p63_spec::BTN_B, p63_spec::BTN_DOWN] {
+            press(m, b, 5);
+        }
+        let tab = m.cpu.bus.peek(p63_core::Addr::new(0x91));
+        assert_eq!(tab, 2, "still on System");
+        assert!(screen_row(m, 14).contains("START+SELECT: DONE"), "still testing, no restart: {}", screen_row(m, 14));
+        press(m, p63_spec::BTN_START | p63_spec::BTN_SELECT, 5);
+        assert!(screen_row(m, 14).contains("A: TEST"), "done: {}", screen_row(m, 14));
+        press(m, p63_spec::BTN_RIGHT, 40);
+        assert_eq!(m.cpu.bus.peek(p63_core::Addr::new(0x91)), 3, "Left and Right turn tabs again");
     }
 
     #[test]
