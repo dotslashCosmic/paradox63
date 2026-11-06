@@ -391,10 +391,15 @@ fn find_bios(given: Option<&Path>) -> Result<PathBuf, String> {
         .ok_or_else(|| "no BIOS: put bios.bin next to p63-sim or in this folder, or pass --bios FILE".to_string())
 }
 
-/// A signed boot ROM file: refused unless its signature verifies.
-fn load_bios(path: &Path) -> Result<Vec<u8>, String> {
+/// A signed boot ROM file, refused unless its signature verifies, and its key from
+/// bios.key in the same folder.
+fn load_bios(path: &Path) -> Result<p63_bus::bios::BootRom, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    p63_bus::bios::verify(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    let key_path = path.with_file_name("bios.key");
+    let mut key = std::fs::read(&key_path).map_err(|e| format!("{}: {e} (bios.key goes next to the BIOS)", key_path.display()))?;
+    let rom = p63_bus::bios::verify(&bytes, &key).map_err(|e| format!("{}: {e}", path.display()));
+    key.iter_mut().for_each(|b| *b = 0);
+    rom
 }
 
 /// Per-second timing for `play --stats`: how evenly frames reach the window, and where the time goes.
@@ -536,6 +541,11 @@ fn run(
     wav: Option<&Path>,
     cards: [Option<&Path>; 2],
 ) -> Result<(), String> {
+    // an encrypted game is plain in the console's memory once it runs
+    let encrypted = std::fs::read(file).ok().and_then(|d| p63_cart::crypt::Layout::of(&d).ok()).is_some_and(|l| l.encrypted);
+    if encrypted && !peek.is_empty() {
+        return Err(format!("{}: --peek reads the console's memory, so it doesn't work with an encrypted cartridge", file.display()));
+    }
     let (mut machine, info) = boot(file, bios)?;
     println!("booted {:?} ({} byte image)", info.title, info.image_len);
     for (slot, path) in cards.iter().enumerate() {
